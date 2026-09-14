@@ -69,6 +69,7 @@ agentic-job-harvester/
 │                                    AGENTS.md constraint #1 fix)
 │
 ├── observability/                ← LangFuse OpenTelemetry setup & trace scoring
+│   └── setup.py                  ← LangFuse client init + LiteLLM callback registration
 │
 ├── services/                     ← Cloud Run microservices (each = one deployable)
 │   ├── apify_receiver.py         ← Ingestion webhook consumer

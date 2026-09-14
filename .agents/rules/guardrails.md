@@ -42,9 +42,13 @@ Every Gemini Flash/Pro/Embedding call MUST route through `gateway/client.py`.
 
 ### G-8: BigQuery Write Safety
 - All BQ inserts must include `job_id` deduplication (90-day window check via `utils/time.py`)
-- `raw_job_postings.status` transitions must follow the state machine:
-  `NEW_RAW → EMBEDDING_QUEUED → EMBEDDING_DONE → SCORED → TIER2_PENDING → COMPLETE`
-- Never update `status` outside the designated service (e.g., only `embedding_worker` sets `EMBEDDING_DONE`)
+- `raw_job_postings.status` tracks the overall job lifecycle through the pipeline:
+  `NEW_RAW → EMBEDDING_QUEUED → EMBEDDING_DONE → SCORED → COMPLETE`
+  Never update `status` outside the designated service (e.g., only `embedding_worker` sets `EMBEDDING_DONE`).
+- `job_evaluated.tier2_status` is a **separate, independent field** used solely as an
+  optimistic lock for the on-demand Tier 2 swarm: `PENDING | IN_PROGRESS | DONE | FAILED`.
+  It guards against double-firing `DueDiligenceSuite` when a user clicks `[🔍 Analyze]`
+  multiple times or across devices. Do not conflate it with the job lifecycle `status`.
 
 ### G-9: LangFuse Correlation
 - Every agent invocation must carry a `trace_id` from `observability/setup.py`
@@ -54,4 +58,7 @@ Every Gemini Flash/Pro/Embedding call MUST route through `gateway/client.py`.
 ### G-10: No Sideways Dependencies
 - Dependency flow: `services → orchestration/agents → retrieval/tools → repositories/interfaces`
 - `schemas/` is depended on by everything; it imports nothing from other project modules
-- `gateway/` is depended on by `agents/base.py` only; never imported in `schemas/` or `repositories/`
+- `gateway/` is depended on by **`agents/base.py`** (structured LLM calls),
+  **`services/embedding_worker.py`** (embedding generation), and
+  **`services/tier1_matcher_runner.py`** (if it triggers any LLM routing).
+  Never imported in `schemas/` or `repositories/`.

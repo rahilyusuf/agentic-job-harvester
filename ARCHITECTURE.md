@@ -77,17 +77,27 @@ Triggered only by user `[🔍 Analyze]` in Streamlit/Telegram. Never automatic.
 | Vector search | BigQuery native vector index | `text-embedding-004`, `ML.DISTANCE` cosine |
 
 ## BigQuery tables (contract)
-- `raw_job_postings` — raw ingested jobs, `status` state machine
+- `raw_job_postings` — raw ingested jobs. `status` column tracks the overall job lifecycle:
+  `STRING, NOT NULL` — values: `NEW_RAW → EMBEDDING_QUEUED → EMBEDDING_DONE → SCORED → COMPLETE`.
+  Only the designated service for each transition may write that value.
 - `job_embeddings` — 768-dim vectors + IVF cosine index
-- `job_evaluated` — Tier 1 scoring output; includes `tier2_status` column (`PENDING |
-  IN_PROGRESS | DONE | FAILED`) used for optimistic locking when `DueDiligenceSuite`
-  is triggered. This is a durable BigQuery column, not a session-state key — it
-  survives across Cloud Run invocations and is the authoritative gate that prevents
-  duplicate Tier 2 runs for the same job.
+- `job_evaluated` — Tier 1 scoring output. Contains two distinct status fields:
+  - **`status`** (`STRING`): mirrors `raw_job_postings.status` at the point of scoring;
+    written by `ScoreDebateLoop` when Tier 1 completes.
+  - **`tier2_status`** (`STRING`): an independent optimistic-lock field used *only* by
+    the on-demand Tier 2 swarm. Values: `PENDING | IN_PROGRESS | DONE | FAILED`.
+    Purpose: prevents `DueDiligenceSuite` from double-firing when a user clicks
+    `[🔍 Analyze]` multiple times or across devices. Written exclusively by
+    `orchestration/hitl_controller.py`. Default on row creation: `PENDING`.
+    This field is **not** part of the job lifecycle state machine — it is a narrow
+    concurrency lock scoped to one on-demand operation. Do not conflate the two.
+  - **`langfuse_trace_id`** (`STRING`): persisted here so HITL actions can attach
+    scores to the correct trace after the ADK session has ended (see Session State
+    Key Registry in AGENTS.md).
 - `job_user_actions` — HITL telemetry (apply/pass/analyze events)
 - `user_profiles` — candidate profile written by the User Profile Service (Streamlit
   → Secret Mgr → User Profile Service). Holds resume metadata pointer, `e_resume`
-  base embedding, and current `e_active_user` centroid — this is what Step A's
+  base embedding, and current `e_active_user` centroid — this is what Step A’s
   `ML.DISTANCE(e_active_user, e_job, 'COSINE')` reads against, and what the weekly
   Reflection Agent updates via the centroid-drift formula.
 
