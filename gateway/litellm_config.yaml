@@ -1,0 +1,82 @@
+# gateway/litellm_config.yaml
+# LiteLLM Proxy configuration — model routing, fallbacks, rate caps.
+# This file is used when running `litellm --config gateway/litellm_config.yaml`
+# See: https://docs.litellm.ai/docs/proxy/configs
+
+general_settings:
+  master_key: "os.environ/LITELLM_PROXY_API_KEY"
+  database_url: "os.environ/LITELLM_DB_URL"    # optional: PostgreSQL for request logging
+  store_model_in_db: false
+
+model_list:
+  # ── Fast Flash — used by all Tier 1 + Tier 2 agents ─────────────────────
+  - model_name: fast-flash
+    litellm_params:
+      model: gemini/gemini-2.5-flash
+      api_key: "os.environ/GEMINI_API_KEY"
+      temperature: 0.1
+      max_tokens: 4096
+    model_info:
+      max_input_tokens: 1048576
+      max_output_tokens: 4096
+      cost_per_input_token: 0.000000075
+      cost_per_output_token: 0.000000300
+
+  # ── Deep Pro — ReflectionAgent only (weekly, cost-tolerant) ──────────────
+  - model_name: deep-pro
+    litellm_params:
+      model: gemini/gemini-2.5-pro
+      api_key: "os.environ/GEMINI_API_KEY"
+      temperature: 0.2
+      max_tokens: 8192
+    model_info:
+      max_input_tokens: 1048576
+      max_output_tokens: 8192
+      cost_per_input_token: 0.00000125
+      cost_per_output_token: 0.00001000
+
+  # ── Router Flash — cheapest viable model for JobIntakeRouter ─────────────
+  - model_name: router-flash
+    litellm_params:
+      model: gemini/gemini-2.5-flash
+      api_key: "os.environ/GEMINI_API_KEY"
+      temperature: 0.0
+      max_tokens: 512
+    model_info:
+      max_input_tokens: 1048576
+      max_output_tokens: 512
+
+router_settings:
+  # Fallback: if fast-flash fails (quota/timeout), fall back to a 2nd Flash instance
+  fallbacks:
+    - fast-flash:
+        - fast-flash   # retry once, then fail (pro not used for flash tasks)
+    - deep-pro:
+        - fast-flash   # graceful degradation if Pro unavailable
+
+  # Retry configuration
+  num_retries: 2
+  retry_after: 5  # seconds between retries
+  allowed_fails: 1
+  cooldown_time: 30  # seconds to wait before re-routing to a failed model
+
+litellm_settings:
+  # LangFuse callback — auto-logs all prompts/tokens/latency
+  success_callback: ["langfuse"]
+  failure_callback: ["langfuse"]
+  langfuse_public_key: "os.environ/LANGFUSE_PUBLIC_KEY"
+  langfuse_secret_key: "os.environ/LANGFUSE_SECRET_KEY"
+  langfuse_host: "os.environ/LANGFUSE_HOST"
+
+  # Rate limits (per model per minute)
+  rpm_limit: 60
+  tpm_limit: 4000000
+
+  # Cost tracking
+  track_cost_callback: true
+  max_budget: 50.0   # USD monthly guard rail
+  budget_duration: "1mo"
+
+  # Request/response timeouts
+  request_timeout: 60    # seconds
+  stream_timeout: 120

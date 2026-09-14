@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "agentic-job-harvester"
+version = "0.1.0"
+description = "Enterprise-grade multi-agent job intelligence & due-diligence platform"
+requires-python = ">=3.11"
+readme = "README.md"
+license = { text = "Proprietary" }
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-v --tb=short --strict-markers"
+markers = [
+    "unit: fast unit tests with no I/O",
+    "integration: tests that require live GCP credentials",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+    "N",   # pep8-naming
+    "ANN", # type annotations
+    "SIM", # simplification
+    "TCH", # type-checking imports
+]
+ignore = [
+    "ANN101",  # missing self annotation
+    "ANN102",  # missing cls annotation
+    "ANN401",  # allow Any in dynamic contexts
+]
+
+[tool.ruff.isort]
+known-first-party = ["agents", "config", "gateway", "observability", "orchestration", "repositories", "retrieval", "schemas", "services", "tools", "utils"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+plugins = ["pydantic.mypy"]
+exclude = ["venv/", "scripts/"]
+
+[tool.coverage.run]
+source = ["agents", "orchestration", "retrieval", "repositories", "gateway", "services"]
+omit = ["tests/*", "scripts/*", "venv/*"]
+
+[tool.coverage.report]
+fail_under = 70
+show_missing = true

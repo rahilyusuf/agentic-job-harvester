@@ -1,0 +1,153 @@
+# infra/cloudbuild.yaml
+# Cloud Build configuration for building and pushing all Cloud Run service images.
+# Usage: gcloud builds submit --config infra/cloudbuild.yaml .
+#
+# Substitutions (set via --substitutions or Cloud Build trigger):
+#   _PROJECT_ID: GCP project ID
+#   _REGION: Cloud Run region (e.g. us-central1)
+#   _REGISTRY: Artifact Registry repository (e.g. us-central1-docker.pkg.dev/project/repo)
+
+substitutions:
+  _PROJECT_ID: "${PROJECT_ID}"
+  _REGION: "us-central1"
+  _REGISTRY: "${_REGION}-docker.pkg.dev/${_PROJECT_ID}/job-harvester"
+
+steps:
+  # ── apify-receiver ────────────────────────────────────────────────────────
+  - name: "gcr.io/cloud-builders/docker"
+    id: "build-apify-receiver"
+    args:
+      - build
+      - "-t"
+      - "${_REGISTRY}/apify-receiver:${SHORT_SHA}"
+      - "-t"
+      - "${_REGISTRY}/apify-receiver:latest"
+      - "-f"
+      - "infra/apify_receiver.Dockerfile"
+      - "."
+
+  - name: "gcr.io/cloud-builders/docker"
+    id: "push-apify-receiver"
+    args: ["push", "--all-tags", "${_REGISTRY}/apify-receiver"]
+    waitFor: ["build-apify-receiver"]
+
+  # ── embedding-worker ──────────────────────────────────────────────────────
+  - name: "gcr.io/cloud-builders/docker"
+    id: "build-embedding-worker"
+    args:
+      - build
+      - "-t"
+      - "${_REGISTRY}/embedding-worker:${SHORT_SHA}"
+      - "-t"
+      - "${_REGISTRY}/embedding-worker:latest"
+      - "-f"
+      - "infra/embedding_worker.Dockerfile"
+      - "."
+
+  - name: "gcr.io/cloud-builders/docker"
+    id: "push-embedding-worker"
+    args: ["push", "--all-tags", "${_REGISTRY}/embedding-worker"]
+    waitFor: ["build-embedding-worker"]
+
+  # ── tier1-matcher-runner ──────────────────────────────────────────────────
+  - name: "gcr.io/cloud-builders/docker"
+    id: "build-tier1-matcher"
+    args:
+      - build
+      - "-t"
+      - "${_REGISTRY}/tier1-matcher:${SHORT_SHA}"
+      - "-t"
+      - "${_REGISTRY}/tier1-matcher:latest"
+      - "-f"
+      - "infra/tier1_matcher_runner.Dockerfile"
+      - "."
+
+  - name: "gcr.io/cloud-builders/docker"
+    id: "push-tier1-matcher"
+    args: ["push", "--all-tags", "${_REGISTRY}/tier1-matcher"]
+    waitFor: ["build-tier1-matcher"]
+
+  # ── telegram-webhook ──────────────────────────────────────────────────────
+  - name: "gcr.io/cloud-builders/docker"
+    id: "build-telegram-webhook"
+    args:
+      - build
+      - "-t"
+      - "${_REGISTRY}/telegram-webhook:${SHORT_SHA}"
+      - "-t"
+      - "${_REGISTRY}/telegram-webhook:latest"
+      - "-f"
+      - "infra/telegram_webhook.Dockerfile"
+      - "."
+
+  - name: "gcr.io/cloud-builders/docker"
+    id: "push-telegram-webhook"
+    args: ["push", "--all-tags", "${_REGISTRY}/telegram-webhook"]
+    waitFor: ["build-telegram-webhook"]
+
+  # ── reflection-runner ─────────────────────────────────────────────────────
+  - name: "gcr.io/cloud-builders/docker"
+    id: "build-reflection-runner"
+    args:
+      - build
+      - "-t"
+      - "${_REGISTRY}/reflection-runner:${SHORT_SHA}"
+      - "-t"
+      - "${_REGISTRY}/reflection-runner:latest"
+      - "-f"
+      - "infra/reflection_runner.Dockerfile"
+      - "."
+
+  - name: "gcr.io/cloud-builders/docker"
+    id: "push-reflection-runner"
+    args: ["push", "--all-tags", "${_REGISTRY}/reflection-runner"]
+    waitFor: ["build-reflection-runner"]
+
+  # ── Deploy to Cloud Run (optional — comment out for image-only builds) ────
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "deploy-apify-receiver"
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - apify-receiver
+      - "--image=${_REGISTRY}/apify-receiver:${SHORT_SHA}"
+      - "--region=${_REGION}"
+      - "--platform=managed"
+      - "--allow-unauthenticated"
+      - "--min-instances=0"
+      - "--max-instances=10"
+      - "--memory=512Mi"
+      - "--cpu=1"
+      - "--concurrency=80"
+    waitFor: ["push-apify-receiver"]
+
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "deploy-telegram-webhook"
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - telegram-webhook
+      - "--image=${_REGISTRY}/telegram-webhook:${SHORT_SHA}"
+      - "--region=${_REGION}"
+      - "--platform=managed"
+      - "--allow-unauthenticated"
+      - "--min-instances=1"   # Always warm for HITL response time
+      - "--max-instances=5"
+      - "--memory=512Mi"
+      - "--cpu=1"
+    waitFor: ["push-telegram-webhook"]
+
+images:
+  - "${_REGISTRY}/apify-receiver:${SHORT_SHA}"
+  - "${_REGISTRY}/embedding-worker:${SHORT_SHA}"
+  - "${_REGISTRY}/tier1-matcher:${SHORT_SHA}"
+  - "${_REGISTRY}/telegram-webhook:${SHORT_SHA}"
+  - "${_REGISTRY}/reflection-runner:${SHORT_SHA}"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: "E2_HIGHCPU_8"
+
+timeout: "1200s"
