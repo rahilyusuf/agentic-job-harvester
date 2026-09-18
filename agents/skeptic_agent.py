@@ -115,6 +115,8 @@ class SkepticAgent(BaseIntelligenceAgent):
         output: SkepticOutput = await self._call_llm(  # type: ignore[assignment]
             messages=messages,
             trace_id=trace_id,
+            user_id=user_id,
+            session_id=job.job_id,
         )
 
         # Enforce round_2 trigger logic based on score delta

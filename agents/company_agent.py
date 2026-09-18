@@ -76,6 +76,7 @@ class CompanyVerificationAgent(BaseIntelligenceAgent):
         profile: CompanyProfile = await self._call_llm(  # type: ignore[assignment]
             messages=messages,
             trace_id=trace_id,
+            session_id=job.job_id,
         )
         logger.info(
             "CompanyVerificationAgent: company=%s entity=%s funding=%s headcount=%s",

@@ -100,6 +100,8 @@ class JobIntakeRouter(BaseIntelligenceAgent):
         decision: RouterDecision = await self._call_llm(  # type: ignore[assignment]
             messages=messages,
             trace_id=self._new_trace_id(),
+            user_id=user_id,
+            session_id=job.job_id,
         )
         logger.info(
             "Router decision: job_id=%s decision=%s confidence=%.2f",

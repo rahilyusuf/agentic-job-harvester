@@ -23,9 +23,10 @@
 ## Model Aliases (configured in gateway/litellm_config.yaml)
 | Alias | Resolves To | Use Case |
 |---|---|---|
-| `fast-flash` | `gemini/gemini-2.5-flash` | ScorerAgent, SkepticAgent, CompanyVerificationAgent, RedFlagDetectorAgent, SkillGapAgent |
-| `deep-pro` | `gemini/gemini-2.5-pro` | ReflectionAgent (weekly, cost-tolerant) |
-| `router-flash` | `gemini/gemini-2.5-flash` | JobIntakeRouter (cheapest viable model) |
+| `fast-flash` | `vertex_ai/gemini-2.5-flash` @ `global` | ScorerAgent, SkepticAgent, CompanyVerificationAgent, RedFlagDetectorAgent, SkillGapAgent |
+| `deep-pro` | `vertex_ai/gemini-2.5-pro` @ `global` (10 RPM cap) | ReflectionAgent (weekly, cost-tolerant) |
+| `router-flash` | `vertex_ai/gemini-2.5-flash` @ `global` | JobIntakeRouter (cheapest viable model) |
+| `text-embedding-004` | `vertex_ai/text-embedding-004` @ `us-central1` | `gateway/client.py::generate_embedding()` — 768-dim embeddings |
 
 ## LiteLLM Proxy Constraints
 - Base URL: `${LITELLM_PROXY_BASE_URL}` (env var, never hardcoded)

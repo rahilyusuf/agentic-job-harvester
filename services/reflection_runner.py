@@ -12,7 +12,7 @@ import logging
 import sys
 
 from config.settings import get_settings
-from observability.setup import setup_observability
+from observability.setup import flush_observability, setup_observability
 from agents.reflection_agent import ReflectionAgent
 from repositories.actions_repo import ActionsRepository
 from repositories.embeddings_repo import EmbeddingRepository
@@ -63,6 +63,7 @@ async def main() -> None:
         success_count,
         error_count,
     )
+    flush_observability()
 
 
 if __name__ == "__main__":
