@@ -40,8 +40,8 @@ def _configure_litellm() -> None:
     litellm.api_key = settings.litellm_proxy_api_key
     # LangFuse callback is already wired in litellm_config.yaml on the proxy side;
     # this client-side registration ensures local/test runs also emit traces.
-    litellm.success_callback = ["langfuse"]
-    litellm.failure_callback = ["langfuse"]
+    litellm.success_callback = ["langfuse_otel"]
+    litellm.failure_callback = ["langfuse_otel"]
 
 
 # Initialise once at import time

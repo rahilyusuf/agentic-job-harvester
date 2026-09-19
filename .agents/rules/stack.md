@@ -13,7 +13,7 @@
 - **pydantic**: `>=2.7.0,<3.0.0` — all schemas; use `model_validator`, `field_validator`
 - **pydantic-settings**: `>=2.3.0` — `BaseSettings` subclass in `config/settings.py`; binds env vars and Secret Manager values
 - **instructor**: `>=1.3.0` — structured outputs; always use `instructor.from_litellm()`
-- **litellm**: `>=1.40.0` — proxy client; configure via `gateway/litellm_config.yaml`
+- **litellm**: `>=1.40.0,<2.0.0` — proxy client; configure via `gateway/litellm_config.yaml`
 - **e2b-code-interpreter**: `>=1.0.0` — `AsyncSandbox` for SkillGapAgent code challenges
 - **langfuse**: `>=2.35.0` — `@observe` decorator, `langfuse.score()` for HITL telemetry
 - **python-dotenv**: `>=1.0.1` — local `.env` loading in `config/settings.py`

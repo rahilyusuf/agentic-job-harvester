@@ -65,10 +65,10 @@ def setup_observability() -> None:
     # Wire LiteLLM to auto-log via LangFuse
     # This complements the proxy-side callback in litellm_config.yaml;
     # ensures local/test runs without the proxy also emit traces.
-    if "langfuse" not in litellm.success_callback:
-        litellm.success_callback.append("langfuse")
-    if "langfuse" not in litellm.failure_callback:
-        litellm.failure_callback.append("langfuse")
+    if "langfuse_otel" not in litellm.success_callback:
+        litellm.success_callback.append("langfuse_otel")
+    if "langfuse_otel" not in litellm.failure_callback:
+        litellm.failure_callback.append("langfuse_otel")
 
     logger.info("Observability initialised (LangFuse host=%s)", settings.langfuse_host)
 
