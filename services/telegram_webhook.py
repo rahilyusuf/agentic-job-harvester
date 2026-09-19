@@ -15,7 +15,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 
 from config.settings import get_settings
-from observability.setup import setup_observability
+from observability.setup import flush_observability, setup_observability
 from orchestration.hitl_controller import HITLController
 from repositories.actions_repo import ActionsRepository
 from repositories.evaluated_repo import EvaluatedRepository
@@ -28,6 +28,7 @@ async def lifespan(app: FastAPI):  # type: ignore[type-arg]
     setup_observability()
     logger.info("telegram-webhook started")
     yield
+    flush_observability()
 
 
 app = FastAPI(

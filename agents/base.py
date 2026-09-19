@@ -26,7 +26,7 @@ from typing import Any, ClassVar, TypeVar
 from pydantic import BaseModel
 
 from gateway.client import GatewayClient, get_instructor_client
-from observability.setup import observe
+from observability.setup import observe, update_current_span
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +77,8 @@ class BaseIntelligenceAgent(ABC):
         messages: list[dict[str, str]],
         *,
         trace_id: str | None = None,
+        user_id: str | None = None,
+        session_id: str | None = None,
         max_retries: int = 3,
         **kwargs: Any,
     ) -> BaseModel:
@@ -85,6 +87,10 @@ class BaseIntelligenceAgent(ABC):
         Args:
             messages: OpenAI-format message list (system + user turns).
             trace_id: LangFuse trace ID for cross-trace correlation.
+            user_id: Candidate user ID — attached to the LangFuse trace for
+                filtering traces per user in the Langfuse UI.
+            session_id: Job ID — used as session_id so all agent spans for
+                the same job are grouped in the Langfuse session view.
             max_retries: Instructor auto-retry count on validation failure.
             **kwargs: Additional kwargs forwarded to LiteLLM (e.g. temperature override).
 
@@ -104,6 +110,10 @@ class BaseIntelligenceAgent(ABC):
         self._logger.debug(
             "Calling %s model=%s trace_id=%s", self.__class__.__name__, self.MODEL_ALIAS, tid
         )
+
+        # Enrich the current @observe span with user/session context so every
+        # LLM call is filterable by user and groupable by job in the Langfuse UI.
+        update_current_span(user_id=user_id, session_id=session_id)
 
         result = await self._client.create(
             model=self.MODEL_ALIAS,

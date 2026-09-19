@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 
 from config.settings import get_settings
 from gateway.client import generate_embedding
-from observability.setup import setup_observability
+from observability.setup import flush_observability, setup_observability
 from repositories.profiles_repo import ProfileRepository
 from schemas.profile_models import ResumeMetadata, UserProfile
 
@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):  # type: ignore[type-arg]
     setup_observability()
     yield
+    flush_observability()
 
 
 app = FastAPI(

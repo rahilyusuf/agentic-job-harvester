@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 
 from config.settings import get_settings
 from gateway.client import generate_embedding
-from observability.setup import setup_observability
+from observability.setup import flush_observability, setup_observability
 from repositories.embeddings_repo import EmbeddingRepository
 from repositories.raw_jobs_repo import RawJobRepository
 from schemas.job_models import JobStatus, RawJob
@@ -32,6 +32,7 @@ async def lifespan(app: FastAPI):  # type: ignore[type-arg]
     setup_observability()
     logger.info("embedding-worker started")
     yield
+    flush_observability()
     logger.info("embedding-worker shutting down")
 
 

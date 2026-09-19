@@ -21,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from google.cloud import pubsub_v1
 
 from config.settings import get_settings
-from observability.setup import setup_observability
+from observability.setup import flush_observability, setup_observability
 from repositories.raw_jobs_repo import RawJobRepository
 from schemas.job_models import RawJob
 from utils.ids import compute_job_id
@@ -38,6 +38,7 @@ async def lifespan(app: FastAPI):  # type: ignore[type-arg]
     setup_observability()
     logger.info("apify-receiver started")
     yield
+    flush_observability()
     logger.info("apify-receiver shutting down")
 
 

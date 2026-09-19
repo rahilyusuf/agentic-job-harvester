@@ -13,7 +13,7 @@
 - **pydantic**: `>=2.7.0,<3.0.0` — all schemas; use `model_validator`, `field_validator`
 - **pydantic-settings**: `>=2.3.0` — `BaseSettings` subclass in `config/settings.py`; binds env vars and Secret Manager values
 - **instructor**: `>=1.3.0` — structured outputs; always use `instructor.from_litellm()`
-- **litellm**: `>=1.40.0` — proxy client; configure via `gateway/litellm_config.yaml`
+- **litellm**: `>=1.40.0,<2.0.0` — proxy client; configure via `gateway/litellm_config.yaml`
 - **e2b-code-interpreter**: `>=1.0.0` — `AsyncSandbox` for SkillGapAgent code challenges
 - **langfuse**: `>=2.35.0` — `@observe` decorator, `langfuse.score()` for HITL telemetry
 - **python-dotenv**: `>=1.0.1` — local `.env` loading in `config/settings.py`
@@ -23,9 +23,10 @@
 ## Model Aliases (configured in gateway/litellm_config.yaml)
 | Alias | Resolves To | Use Case |
 |---|---|---|
-| `fast-flash` | `gemini/gemini-2.5-flash` | ScorerAgent, SkepticAgent, CompanyVerificationAgent, RedFlagDetectorAgent, SkillGapAgent |
-| `deep-pro` | `gemini/gemini-2.5-pro` | ReflectionAgent (weekly, cost-tolerant) |
-| `router-flash` | `gemini/gemini-2.5-flash` | JobIntakeRouter (cheapest viable model) |
+| `fast-flash` | `vertex_ai/gemini-2.5-flash` @ `global` | ScorerAgent, SkepticAgent, CompanyVerificationAgent, RedFlagDetectorAgent, SkillGapAgent |
+| `deep-pro` | `vertex_ai/gemini-2.5-pro` @ `global` (10 RPM cap) | ReflectionAgent (weekly, cost-tolerant) |
+| `router-flash` | `vertex_ai/gemini-2.5-flash` @ `global` | JobIntakeRouter (cheapest viable model) |
+| `text-embedding-004` | `vertex_ai/text-embedding-004` @ `us-central1` | `gateway/client.py::generate_embedding()` — 768-dim embeddings |
 
 ## LiteLLM Proxy Constraints
 - Base URL: `${LITELLM_PROXY_BASE_URL}` (env var, never hardcoded)

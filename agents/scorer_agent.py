@@ -119,6 +119,8 @@ class ScorerAgent(BaseIntelligenceAgent):
         output: ScorerOutput = await self._call_llm(  # type: ignore[assignment]
             messages=messages,
             trace_id=trace_id,
+            user_id=user_id,
+            session_id=job.job_id,
         )
         logger.info(
             "ScorerAgent: job_id=%s round=%d initial_score=%d",
