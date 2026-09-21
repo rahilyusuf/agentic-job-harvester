@@ -14,6 +14,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, HttpUrl
 
+from utils.time import utcnow
+
 
 class ResumeMetadata(BaseModel):
     """LLM-extracted structured metadata from a user's resume."""
@@ -73,6 +75,6 @@ class UserProfile(BaseModel):
         description="Minimum agreed_score to trigger Telegram notification"
     )
     is_active: bool = True
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
     last_reflection_at: Optional[datetime] = None

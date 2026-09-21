@@ -13,6 +13,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, model_validator
 
+from utils.time import utcnow
+
 
 class RedFlagSeverity(str, enum.Enum):
     CRITICAL = "CRITICAL"   # Immediate SKIP regardless of score
@@ -53,7 +55,7 @@ class RedFlagAnalysis(BaseModel):
         ...,
         description="PROCEED | CAUTION | AVOID — final recommendation based on flags",
     )
-    analyzed_at: datetime = Field(default_factory=datetime.utcnow)
+    analyzed_at: datetime = Field(default_factory=utcnow)
 
     @model_validator(mode="after")
     def sync_critical_flags(self) -> "RedFlagAnalysis":
@@ -110,7 +112,7 @@ class SkillGapReport(BaseModel):
         ...,
         description="READY | MINOR_GAPS | SIGNIFICANT_GAPS | NOT_QUALIFIED",
     )
-    analyzed_at: datetime = Field(default_factory=datetime.utcnow)
+    analyzed_at: datetime = Field(default_factory=utcnow)
 
     @model_validator(mode="after")
     def compute_gap_counts(self) -> "SkillGapReport":

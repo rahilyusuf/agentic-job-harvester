@@ -28,8 +28,8 @@ class IRawJobRepository(Protocol):
         """Insert a new job record. No-op if job_id already exists within dedup window."""
         ...
 
-    async def batch_insert_jobs(self, jobs: list[RawJob]) -> int:
-        """Batch insert jobs. Returns number of novel (non-duplicate) jobs inserted."""
+    async def batch_insert_jobs(self, jobs: list[RawJob]) -> list[str]:
+        """Batch insert jobs. Returns list of newly inserted job_ids (empty if all duplicates)."""
         ...
 
     async def exists(self, job_id: str) -> bool:

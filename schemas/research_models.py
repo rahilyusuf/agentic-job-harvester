@@ -12,6 +12,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field, HttpUrl
 
+from utils.time import utcnow
+
 
 class FundingStage(str, enum.Enum):
     BOOTSTRAPPED = "BOOTSTRAPPED"
@@ -63,7 +65,7 @@ class CompanyProfile(BaseModel):
     )
     confidence: float = Field(..., ge=0.0, le=1.0)
     sources_used: list[str] = Field(default_factory=list)
-    verified_at: datetime = Field(default_factory=datetime.utcnow)
+    verified_at: datetime = Field(default_factory=utcnow)
 
 
 class CompanyResearch(BaseModel):
@@ -84,7 +86,7 @@ class CompanyResearch(BaseModel):
     )
     key_risks: list[str] = Field(default_factory=list, max_length=10)
     key_positives: list[str] = Field(default_factory=list, max_length=10)
-    researched_at: datetime = Field(default_factory=datetime.utcnow)
+    researched_at: datetime = Field(default_factory=utcnow)
     cache_ttl_hours: int = Field(
         72, description="How long to cache this research in Firestore (default 72h)"
     )

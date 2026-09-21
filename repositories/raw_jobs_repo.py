@@ -57,10 +57,10 @@ class RawJobRepository:
         logger.info("Inserted job_id=%s", job.job_id)
 
     @async_retry(max_attempts=3, base_delay=1.0)
-    async def batch_insert_jobs(self, jobs: list[RawJob]) -> int:
-        """Batch insert jobs. Returns count of novel (non-duplicate) inserts."""
+    async def batch_insert_jobs(self, jobs: list[RawJob]) -> list[str]:
+        """Batch insert jobs. Returns list of newly inserted job_ids (empty if all duplicates)."""
         if not jobs:
-            return 0
+            return []
 
         # Check all job_ids in one BQ query
         ids = [j.job_id for j in jobs]
@@ -76,15 +76,16 @@ class RawJobRepository:
         novel_jobs = [j for j in jobs if j.job_id not in existing]
         if not novel_jobs:
             logger.info("All %d jobs are duplicates; nothing inserted.", len(jobs))
-            return 0
+            return []
 
         rows = [j.model_dump(mode="json") for j in novel_jobs]
         errors = self._client.insert_rows_json(self._table, rows)
         if errors:
             raise RuntimeError(f"BQ batch insert errors: {errors}")
 
+        novel_ids = [j.job_id for j in novel_jobs]
         logger.info("Batch inserted %d/%d novel jobs.", len(novel_jobs), len(jobs))
-        return len(novel_jobs)
+        return novel_ids
 
     async def exists(self, job_id: str) -> bool:
         """Check if job_id exists within the 90-day dedup window."""

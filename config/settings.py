@@ -81,6 +81,12 @@ class Settings(BaseSettings):
 
     # ── Apify ─────────────────────────────────────────────────────────────────
     apify_webhook_secret: str = Field("", description="HMAC secret for Apify webhook validation")
+    apify_api_token_secret: str = Field(
+        "apify-api-token",
+        description="Secret Manager secret name for the Apify API token",
+    )
+    # Resolved at runtime via resolve_secrets — never log this value
+    apify_api_token: str = Field("", exclude=True)
 
     # ── Scoring Thresholds ─────────────────────────────────────────────────────
     notification_score_threshold: int = Field(
@@ -118,6 +124,10 @@ class Settings(BaseSettings):
             )
         if not self.e2b_api_key:
             self.e2b_api_key = _fetch_secret(self.gcp_project_id, self.e2b_api_key_secret)
+        if not self.apify_api_token:
+            self.apify_api_token = _fetch_secret(
+                self.gcp_project_id, self.apify_api_token_secret
+            )
         return self
 
 
