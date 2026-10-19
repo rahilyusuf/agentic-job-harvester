@@ -22,6 +22,8 @@ from repositories.actions_repo import ActionsRepository
 from repositories.profiles_repo import ProfileRepository
 from unittest.mock import MagicMock
 
+from schemas.job_models import RawJob
+
 
 def make_mock_bq_client() -> MagicMock:
     """Return a mock BigQuery client to avoid real GCP calls."""
@@ -84,3 +86,31 @@ def test_invalid_actions_repo_action_raises() -> None:
         asyncio.run(repo.record_action(
             job_id="test", user_id="user", action="unknown_action"
         ))
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_raw_jobs_batch_insert_uses_array_parameter(mock_bq: MagicMock) -> None:
+    """batch_insert_jobs must bind job_ids via bigquery.ArrayQueryParameter."""
+    repo = RawJobRepository(bq_client=mock_bq, dataset="test_dataset")
+    job = RawJob(
+        job_id="test_id_123",
+        job_url="https://example.com/jobs/123",  # type: ignore[arg-type]
+        title="AI Engineer",
+        company="TechCorp",
+        location="Dubai",
+        description="Build LLM applications with python and langchain for enterprise.",
+        source="test",
+    )
+    inserted = await repo.batch_insert_jobs([job])
+    assert inserted == ["test_id_123"]
+    mock_bq.query_and_wait.assert_called_once()
+    call_args, call_kwargs = mock_bq.query_and_wait.call_args
+    assert "UNNEST(@ids)" in call_args[0]
+    job_config = call_kwargs.get("job_config")
+    assert job_config is not None
+    assert len(job_config.query_parameters) == 1
+    param = job_config.query_parameters[0]
+    assert param.name == "ids"
+    assert param.values == ["test_id_123"]
+

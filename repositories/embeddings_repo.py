@@ -28,7 +28,10 @@ class EmbeddingRepository:
         dataset: str | None = None,
     ) -> None:
         settings = get_settings()
-        self._client = bq_client or bigquery.Client(project=settings.gcp_project_id)
+        self._client = bq_client or bigquery.Client(
+            project=settings.gcp_project_id,
+            location=settings.bq_location,
+        )
         self._dataset = dataset or settings.bq_dataset
         self._project = settings.gcp_project_id
         self._table = f"{self._project}.{self._dataset}.job_embeddings"

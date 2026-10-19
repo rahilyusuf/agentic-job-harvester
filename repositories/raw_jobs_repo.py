@@ -33,7 +33,10 @@ class RawJobRepository:
         dataset: str | None = None,
     ) -> None:
         settings = get_settings()
-        self._client = bq_client or bigquery.Client(project=settings.gcp_project_id)
+        self._client = bq_client or bigquery.Client(
+            project=settings.gcp_project_id,
+            location=settings.bq_location,
+        )
         self._dataset = dataset or settings.bq_dataset
         self._project = settings.gcp_project_id
         self._table = f"{self._project}.{self._dataset}.raw_job_postings"
@@ -62,16 +65,20 @@ class RawJobRepository:
         if not jobs:
             return []
 
-        # Check all job_ids in one BQ query
+        # Check all job_ids in one BQ query using array parameter
         ids = [j.job_id for j in jobs]
-        placeholder = ", ".join(f"'{jid}'" for jid in ids)
         window_start = format_bq_timestamp(get_dedup_window_start())
         query = f"""
             SELECT job_id FROM `{self._table}`
-            WHERE job_id IN ({placeholder})
+            WHERE job_id IN UNNEST(@ids)
               AND scraped_at >= '{window_start}'
         """
-        existing = {row.job_id for row in self._client.query_and_wait(query)}
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ArrayQueryParameter("ids", "STRING", ids),
+            ]
+        )
+        existing = {row.job_id for row in self._client.query_and_wait(query, job_config=job_config)}
 
         novel_jobs = [j for j in jobs if j.job_id not in existing]
         if not novel_jobs:
