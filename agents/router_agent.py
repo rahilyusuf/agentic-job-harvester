@@ -17,6 +17,7 @@ from google.cloud import firestore
 from agents.base import BaseIntelligenceAgent
 from config.settings import get_settings
 from observability.setup import observe
+from orchestration.input_sanitizer import format_job_for_prompt
 from schemas.job_models import RawJob
 from schemas.routing_models import RouterDecision
 
@@ -65,19 +66,15 @@ class JobIntakeRouter(BaseIntelligenceAgent):
         job: RawJob,
         preference_rules: list[dict],
         user_context: str,
-    ) -> list[dict[str, str]]:
+     ) -> list[dict[str, str]]:
         rules_text = json.dumps(preference_rules, indent=2) if preference_rules else "No rules yet."
+        job_block = format_job_for_prompt(job, max_description_chars=1500)
         return [
             self._system_message(),
             self._user_message(
                 f"## User Context\n{user_context}\n\n"
                 f"## Dynamic Preference Rules\n{rules_text}\n\n"
-                f"## Job Posting\n"
-                f"Title: {job.title}\n"
-                f"Company: {job.company}\n"
-                f"Location: {job.location or 'Not specified'}\n"
-                f"Employment: {job.employment_type_raw or 'Not specified'}\n"
-                f"Description (first 1500 chars):\n{job.description[:1500]}\n\n"
+                f"## Job Posting\n{job_block}\n\n"
                 f"Make a routing decision. job_id={job.job_id}"
             ),
         ]
