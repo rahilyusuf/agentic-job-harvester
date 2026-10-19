@@ -36,6 +36,7 @@ import hashlib
 import hmac
 import json
 import logging
+import sys
 from contextlib import asynccontextmanager
 from typing import Any, cast
 
@@ -64,6 +65,25 @@ _PUBSUB_PUBLISH_TIMEOUT_S = 10.0  # seconds per message
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # type: ignore[type-arg]
     """Startup and shutdown lifecycle."""
+    # Enable INFO-level logging for all application modules.
+    #
+    # Why this approach (not basicConfig(force=True)):
+    #   - Uvicorn installs handlers on its OWN named loggers (uvicorn,
+    #     uvicorn.error, uvicorn.access) with propagate=False.  It leaves
+    #     the root logger untouched (level=WARNING, zero handlers).
+    #   - Our app loggers (services.*, repositories.*, etc.) propagate to
+    #     root by default.  Raising root to INFO means they emit; adding a
+    #     single root StreamHandler gives them somewhere to send records.
+    #   - force=True would discard uvicorn’s handlers — avoided here so
+    #     uvicorn’s own access/error logs continue working normally.
+    _LOG_FORMAT = "%(asctime)s %(levelname)-8s %(name)s  %(message)s"
+    _LOG_DATEFMT = "%Y-%m-%dT%H:%M:%S"
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    if not root_logger.handlers:
+        _handler = logging.StreamHandler(sys.stdout)
+        _handler.setFormatter(logging.Formatter(fmt=_LOG_FORMAT, datefmt=_LOG_DATEFMT))
+        root_logger.addHandler(_handler)
     setup_observability()
     logger.info("apify-receiver started")
     yield
@@ -117,7 +137,7 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
             "actorId": "...",
             "actorRunId": "...",
             "actorTaskId": "..."    // optional
-        },
+        },      
         "resource": {
             "id": "<actorRunId>",
             "actId": "<actorId>",
@@ -128,6 +148,8 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
     }
     """
     settings = get_settings()
+
+    logger.info("── APIFY WEBHOOK START ──────────────────────────────────────")
 
     # ── Step 1: Read raw body before any parsing ───────────────────────────────
     body = await request.body()
@@ -189,7 +211,7 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
         )
 
     logger.info(
-        "Processing ACTOR.RUN.SUCCEEDED | actor_id=%s actor_run_id=%s dataset_id=%s",
+        "── WEBHOOK PARSED  actor_id=%s  actor_run_id=%s  dataset_id=%s",
         actor_id,
         actor_run_id,
         dataset_id,
@@ -207,27 +229,36 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
             ),
         )
 
+    logger.info("── FETCHING DATASET  dataset_id=%s", dataset_id)
     raw_items = await _fetch_dataset_items(dataset_id, settings.apify_api_token)
 
     if not raw_items:
-        logger.info("Dataset %s returned 0 items; nothing to process.", dataset_id)
+        logger.info("── DATASET FETCHED  item_count=0  dataset_id=%s — nothing to process", dataset_id)
         return {"dataset_id": dataset_id, "received": 0, "inserted": 0, "published": 0}
 
+    logger.info("── DATASET FETCHED  item_count=%d  dataset_id=%s", len(raw_items), dataset_id)
+
     # ── Step 7: Normalize items into canonical RawJob records ─────────────────
+    logger.info("── NORMALIZATION START  items=%d", len(raw_items))
     jobs: list[RawJob] = []
     skipped = 0
+    apply_url_fallback_count = 0
     for item in raw_items:
+        _, used_fallback = apify_career_scraper.resolve_job_url(item)
         normalized = apify_career_scraper.normalize(item)
         if normalized is not None:
             jobs.append(normalized)
+            if used_fallback:
+                apply_url_fallback_count += 1
         else:
             skipped += 1
 
     logger.info(
-        "Normalization complete: total=%d valid=%d skipped=%d",
+        "── NORMALIZATION COMPLETE  received=%d  valid=%d  skipped=%d  apply_url_fallback=%d",
         len(raw_items),
         len(jobs),
         skipped,
+        apply_url_fallback_count,
     )
 
     if not jobs:
@@ -236,11 +267,13 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
             "received": len(raw_items),
             "inserted": 0,
             "published": 0,
+            "apply_url_fallback": apply_url_fallback_count,
             "message": "All items were malformed or had insufficient description",
         }
 
     # ── Step 8: Batch insert with deduplication ────────────────────────────────
 
+    logger.info("── BIGQUERY PERSIST START  jobs_to_insert=%d", len(jobs))
     repo = RawJobRepository()
     try:
         inserted_ids: list[str] = await repo.batch_insert_jobs(jobs)
@@ -257,11 +290,9 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
 
     inserted_count = len(inserted_ids)
     logger.info(
-        "Deduplication result: received=%d valid=%d inserted=%d | dataset_id=%s",
-        len(raw_items),
-        len(jobs),
+        "── BIGQUERY PERSIST COMPLETE  novel_inserted=%d  duplicates_skipped=%d",
         inserted_count,
-        dataset_id,
+        len(jobs) - inserted_count,
     )
 
     # ── Step 9: Publish ONLY the newly inserted job_ids to Pub/Sub ────────────
@@ -269,16 +300,25 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
     published_count = 0
     publish_failures = 0
     if inserted_ids:
+        logger.info("── PUBSUB PUBLISH START  job_ids_to_publish=%d", len(inserted_ids))
         published_count, publish_failures = await _publish_job_ids(
             inserted_ids,
             project_id=settings.gcp_project_id,
             topic=settings.pubsub_embedding_topic,
         )
+        logger.info(
+            "── PUBSUB PUBLISH COMPLETE  published=%d  failures=%d",
+            published_count,
+            publish_failures,
+        )
 
     logger.info(
-        "apify_webhook complete: dataset_id=%s received=%d inserted=%d published=%d publish_failures=%d",
+        "── APIFY WEBHOOK COMPLETE  dataset_id=%s  received=%d  normalized=%d"
+        "  apply_url_fallback=%d  inserted=%d  published=%d  publish_failures=%d",
         dataset_id,
         len(raw_items),
+        len(jobs),
+        apply_url_fallback_count,
         inserted_count,
         published_count,
         publish_failures,
@@ -289,6 +329,7 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
         "actor_run_id": actor_run_id,
         "received": len(raw_items),
         "normalized": len(jobs),
+        "apply_url_fallback": apply_url_fallback_count,
         "inserted": inserted_count,
         "published": published_count,
         "publish_failures": publish_failures,
