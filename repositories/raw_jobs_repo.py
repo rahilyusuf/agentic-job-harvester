@@ -137,3 +137,52 @@ class RawJobRepository:
             LIMIT {limit}
         """
         return [self._row_to_raw_job(row) for row in self._client.query_and_wait(query)]
+
+    async def get_unembedded_job_ids(
+        self,
+        job_ids: list[str] | None = None,
+        limit: int = 100,
+        min_age_seconds: int = 0,
+    ) -> list[str]:
+        """Fetch job IDs that are saved in raw_job_postings but remain unembedded (status=NEW_RAW).
+
+        Args:
+            job_ids: Optional list of candidate job IDs to filter against (e.g. from a retried batch).
+            limit: Maximum number of job IDs to return.
+            min_age_seconds: Minimum age in seconds since scraped_at (to avoid racing with fresh writes).
+
+        Returns:
+            List of job_id strings with status = 'NEW_RAW'.
+        """
+        window_start = format_bq_timestamp(get_dedup_window_start())
+        if job_ids is not None:
+            if not job_ids:
+                return []
+            query = f"""
+                SELECT job_id FROM `{self._table}`
+                WHERE job_id IN UNNEST(@ids)
+                  AND status = '{JobStatus.NEW_RAW.value}'
+                  AND scraped_at >= '{window_start}'
+                LIMIT {limit}
+            """
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ArrayQueryParameter("ids", "STRING", job_ids),
+                ]
+            )
+            rows = self._client.query_and_wait(query, job_config=job_config)
+        else:
+            age_filter = ""
+            if min_age_seconds > 0:
+                age_filter = f"AND scraped_at <= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {min_age_seconds} SECOND)"
+            query = f"""
+                SELECT job_id FROM `{self._table}`
+                WHERE status = '{JobStatus.NEW_RAW.value}'
+                  AND scraped_at >= '{window_start}'
+                  {age_filter}
+                ORDER BY scraped_at ASC
+                LIMIT {limit}
+            """
+            rows = self._client.query_and_wait(query)
+
+        return [row.job_id for row in rows]

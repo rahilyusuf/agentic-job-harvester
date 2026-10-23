@@ -32,84 +32,119 @@ class Settings(BaseSettings):
 
     # ── GCP Core ──────────────────────────────────────────────────────────────
     gcp_project_id: str = Field(..., description="GCP project ID")
-    gcp_region: str = Field("us-central1", description="Default Cloud Run / Vertex region")
+    gcp_region: str = Field(default="us-central1", description="Default Cloud Run / Vertex region")
 
     # ── BigQuery ───────────────────────────────────────────────────────────────
-    bq_dataset: str = Field("job_intelligence", description="BigQuery dataset ID")
-    bq_location: str = Field("US", description="BigQuery dataset location")
+    bq_dataset: str = Field(default="job_intelligence", description="BigQuery dataset ID")
+    bq_location: str = Field(default="US", description="BigQuery dataset location")
 
     # ── LiteLLM Proxy ─────────────────────────────────────────────────────────
     litellm_proxy_base_url: str = Field(
         ..., description="Base URL of the LiteLLM proxy (e.g. http://localhost:4000)"
     )
     litellm_proxy_api_key_secret: str = Field(
-        "litellm-proxy-api-key",
+        default="litellm-proxy-api-key",
         description="Secret Manager secret name for the LiteLLM proxy API key",
     )
     # Resolved at runtime via _resolve_litellm_api_key
-    litellm_proxy_api_key: str = Field("", exclude=True)
+    litellm_proxy_api_key: str = Field(default="", exclude=True)
 
     # ── LangFuse ──────────────────────────────────────────────────────────────
-    langfuse_public_key: str = Field("", description="LangFuse public key (from env or Secret Mgr)")
-    langfuse_secret_key: str = Field("", description="LangFuse secret key")
-    langfuse_host: str = Field("https://cloud.langfuse.com")
+    langfuse_public_key: str = Field(default="", description="LangFuse public key (from env or Secret Mgr)")
+    langfuse_secret_key: str = Field(default="", description="LangFuse secret key")
+    langfuse_host: str = Field(default="https://cloud.langfuse.com")
 
     # ── Telegram ──────────────────────────────────────────────────────────────
     telegram_bot_token_secret: str = Field(
-        "telegram-bot-token", description="Secret Manager secret name for Telegram bot token"
+        default="telegram-bot-token", description="Secret Manager secret name for Telegram bot token"
     )
-    telegram_bot_token: str = Field("", exclude=True)
+    telegram_bot_token: str = Field(default="", exclude=True)
 
     # ── Firestore ─────────────────────────────────────────────────────────────
     firestore_database_id: str = Field(
-        "(default)", description="Firestore database ID"
+        default="(default)", description="Firestore database ID"
     )
 
     # ── Pub/Sub ───────────────────────────────────────────────────────────────
     pubsub_embedding_topic: str = Field(
-        "job-embedding-queue", description="Pub/Sub topic for job embedding queue"
+        default="job-embedding-queue", description="Pub/Sub topic for job embedding queue"
     )
 
     # ── E2B Sandbox ───────────────────────────────────────────────────────────
     e2b_api_key_secret: str = Field(
-        "e2b-api-key", description="Secret Manager secret name for E2B API key"
+        default="e2b-api-key", description="Secret Manager secret name for E2B API key"
     )
-    e2b_api_key: str = Field("", exclude=True)
+    e2b_api_key: str = Field(default="", exclude=True)
     e2b_sandbox_timeout_seconds: int = Field(
-        30, ge=5, le=120, description="Hard timeout for E2B sandbox execution"
+        default=30, ge=5, le=120, description="Hard timeout for E2B sandbox execution"
+    )
+
+    # ── Environment ───────────────────────────────────────────────────────────
+    environment: str = Field(
+        default="development",
+        description="Runtime environment: development | staging | production",
     )
 
     # ── Apify ─────────────────────────────────────────────────────────────────
-    apify_webhook_secret: str = Field("", description="HMAC secret for Apify webhook validation")
+    apify_webhook_secret: str = Field(default="", description="HMAC secret for Apify webhook validation")
     apify_api_token_secret: str = Field(
-        "apify-api-token",
+        default="apify-api-token",
         description="Secret Manager secret name for the Apify API token",
     )
     # Resolved at runtime via resolve_secrets — never log this value
-    apify_api_token: str = Field("", exclude=True)
+    apify_api_token: str = Field(default="", exclude=True)
+    apify_allowed_actor_ids: list[str] = Field(
+        default_factory=list,
+        description="Allowlist of authorized Apify Actor IDs (empty allows all in dev)",
+    )
 
     # ── Scoring Thresholds ─────────────────────────────────────────────────────
     notification_score_threshold: int = Field(
-        85, ge=0, le=100,
+        default=85, ge=0, le=100,
         description="Minimum agreed_score to trigger Telegram notification (default per user)"
     )
     debate_score_delta_threshold: int = Field(
-        10, ge=1, le=50,
+        default=10, ge=1, le=50,
         description="If |scorer - skeptic| > this, trigger round 2 of debate"
     )
 
     # ── Deduplication ─────────────────────────────────────────────────────────
-    dedup_window_days: int = Field(90, ge=1, le=365, description="BQ dedup window in days")
+    dedup_window_days: int = Field(default=90, ge=1, le=365, description="BQ dedup window in days")
 
     # ── Retrieval ─────────────────────────────────────────────────────────────
-    vector_search_top_k: int = Field(50, ge=1, le=200, description="Step A: BQ VECTOR_SEARCH top K")
-    prefilter_max_results: int = Field(15, ge=1, le=50, description="Step B: regex gate max output")
-    prefilter_max_yoe: int = Field(5, ge=0, le=30, description="Maximum YOE allowed through prefilter")
+    vector_search_top_k: int = Field(default=50, ge=1, le=200, description="Step A: BQ VECTOR_SEARCH top K")
+    prefilter_max_results: int = Field(default=15, ge=1, le=50, description="Step B: regex gate max output")
+    prefilter_max_yoe: int = Field(default=5, ge=0, le=30, description="Maximum YOE allowed through prefilter")
 
     @field_validator("bq_location")
     @classmethod
     def bq_location_upper(cls, v: str) -> str:
         return v.upper()
+
+    @field_validator("apify_allowed_actor_ids", mode="before")
+    @classmethod
+    def parse_allowed_actor_ids(cls, v: object) -> list[str]:
+        if isinstance(v, str):
+            v = v.strip()
+            if not v:
+                return []
+            if v.startswith("[") and v.endswith("]"):
+                import json
+                try:
+                    parsed = json.loads(v)
+                    if isinstance(parsed, list):
+                        return [str(x).strip() for x in parsed if str(x).strip()]
+                except Exception:
+                    pass
+            return [item.strip() for item in v.split(",") if item.strip()]
+        if isinstance(v, (list, tuple, set)):
+            return [str(item).strip() for item in v if str(item).strip()]
+        return []
+
+    @property
+    def is_production(self) -> bool:
+        """Return True if running in a production environment."""
+        return self.environment.lower() in ("production", "prod")
 
     @model_validator(mode="after")
     def resolve_secrets(self) -> "Settings":

@@ -48,6 +48,15 @@ class IRawJobRepository(Protocol):
         """Return jobs with status=EMBEDDING_QUEUED, ordered by scraped_at ASC."""
         ...
 
+    async def get_unembedded_job_ids(
+        self,
+        job_ids: list[str] | None = None,
+        limit: int = 100,
+        min_age_seconds: int = 0,
+    ) -> list[str]:
+        """Fetch job IDs saved in raw_job_postings that remain unembedded (status=NEW_RAW)."""
+        ...
+
 
 # ── Embeddings ─────────────────────────────────────────────────────────────────
 

@@ -56,7 +56,9 @@ logger = logging.getLogger(__name__)
 # ── Constants ──────────────────────────────────────────────────────────────────
 
 _APIFY_DATASET_API = "https://api.apify.com/v2/datasets/{dataset_id}/items"
+_APIFY_ACTOR_RUN_API = "https://api.apify.com/v2/actor-runs/{actor_run_id}"
 _DATASET_FETCH_TIMEOUT_S = 60.0   # seconds; dataset fetch can be large
+_RUN_VERIFY_TIMEOUT_S = 15.0      # seconds; metadata check
 _PUBSUB_PUBLISH_TIMEOUT_S = 10.0  # seconds per message
 
 
@@ -154,60 +156,108 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
     # ── Step 1: Read raw body before any parsing ───────────────────────────────
     body = await request.body()
 
-    # ── Step 2: HMAC signature validation ─────────────────────────────────────
-    # Apify does not natively add HMAC signatures. This validation is only
-    # active when APIFY_WEBHOOK_SECRET is set, which requires configuring the
-    # X-Apify-Signature header in the Apify Console Headers template.
-    # Algorithm: HMAC-SHA256(key=secret, msg=raw_body), compared as hex digest.
+    # ── Step 2: Inbound Authentication Enforcement ────────────────────────────
+    if settings.is_production and not settings.apify_webhook_secret:
+        logger.error("APIFY_WEBHOOK_SECRET is not configured in production environment!")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Webhook authentication secret is not configured in production",
+        )
+
     if settings.apify_webhook_secret:
         signature = request.headers.get("X-Apify-Signature", "")
-        expected = hmac.new(
+        shared_secret = request.headers.get("X-Apify-Webhook-Secret", "")
+        auth_header = request.headers.get("Authorization", "")
+        bearer_secret = auth_header[7:].strip() if auth_header.startswith("Bearer ") else ""
+
+        expected_hmac = hmac.new(
             settings.apify_webhook_secret.encode("utf-8"),
             body,
             hashlib.sha256,
         ).hexdigest()
-        if not hmac.compare_digest(signature, expected):
+
+        is_valid_hmac = bool(signature and hmac.compare_digest(signature, expected_hmac))
+        is_valid_secret_header = bool(
+            shared_secret and hmac.compare_digest(shared_secret, settings.apify_webhook_secret)
+        )
+        is_valid_bearer = bool(
+            bearer_secret and hmac.compare_digest(bearer_secret, settings.apify_webhook_secret)
+        )
+
+        if not (is_valid_hmac or is_valid_secret_header or is_valid_bearer):
+            client_ip = request.client.host if request.client else "unknown"
             logger.warning(
-                "Webhook signature mismatch from %s",
-                request.client.host if request.client else "unknown",
+                "Unauthorized webhook request from %s (missing or invalid credentials)",
+                client_ip,
             )
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid webhook signature",
+                detail="Missing or invalid webhook credentials",
             )
 
     # ── Step 3: Parse JSON body ────────────────────────────────────────────────
     try:
         payload: dict[str, Any] = json.loads(body)
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid JSON body: {exc}",
         ) from exc
 
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Webhook payload must be a JSON object",
+        )
+
     # ── Step 4: Validate event type ────────────────────────────────────────────
     event_type: str = payload.get("eventType", "")
+    if not event_type:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Webhook payload missing eventType",
+        )
     if event_type != "ACTOR.RUN.SUCCEEDED":
         logger.info("Ignoring non-success event type: %s", event_type)
         return {
             "received": event_type,
+            "inserted": 0,
+            "published": 0,
             "message": f"Event type '{event_type}' ignored; only ACTOR.RUN.SUCCEEDED is processed.",
         }
 
-    # ── Step 5: Extract actor run metadata ────────────────────────────────────
+    # ── Step 5: Extract & validate actor run metadata ──────────────────────────
     resource: dict[str, Any] = payload.get("resource", {})
-    actor_run_id: str = resource.get("id", "") or payload.get("eventData", {}).get("actorRunId", "")
-    actor_id: str = resource.get("actId", "") or payload.get("eventData", {}).get("actorId", "")
+    if not isinstance(resource, dict) or not resource:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Webhook payload missing resource object",
+        )
+
+    run_status: str = resource.get("status", "SUCCEEDED")
+    if run_status != "SUCCEEDED":
+        logger.info("Actor run status '%s' is not SUCCEEDED; skipping", run_status)
+        return {
+            "received": run_status,
+            "inserted": 0,
+            "published": 0,
+            "message": f"Actor run status '{run_status}' is not SUCCEEDED; skipped.",
+        }
+
+    actor_run_id: str = (resource.get("id") or payload.get("eventData", {}).get("actorRunId") or "").strip()
+    actor_id: str = (resource.get("actId") or payload.get("eventData", {}).get("actorId") or "").strip()
     dataset_id: str = resource.get("defaultDatasetId", "").strip()
 
-    if not dataset_id:
+    if not actor_run_id or not actor_id or not dataset_id:
         logger.error(
-            "ACTOR.RUN.SUCCEEDED webhook missing resource.defaultDatasetId | actor_run_id=%s",
+            "Malformed webhook payload: missing id, actId, or defaultDatasetId | run_id=%s act_id=%s dataset_id=%s",
             actor_run_id,
+            actor_id,
+            dataset_id,
         )
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Webhook payload missing resource.defaultDatasetId",
+            detail="Webhook payload missing required fields (id, actId, defaultDatasetId)",
         )
 
     logger.info(
@@ -217,9 +267,21 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
         dataset_id,
     )
 
-    # ── Step 6: Fetch dataset items from Apify Dataset API ────────────────────
+    # ── Step 5b: Actor allowlist authorization ────────────────────────────────
+    if settings.apify_allowed_actor_ids and actor_id not in settings.apify_allowed_actor_ids:
+        logger.warning(
+            "Unauthorized actor_id=%s not in allowlist: %s",
+            actor_id,
+            settings.apify_allowed_actor_ids,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Actor ID '{actor_id}' is not authorized",
+        )
+
+    # ── Step 6: Verify actor run directly with Apify API ───────────────────────
     if not settings.apify_api_token:
-        logger.error("apify_api_token is not configured; cannot fetch dataset items")
+        logger.error("apify_api_token is not configured; cannot verify run or fetch dataset items")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=(
@@ -227,6 +289,44 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
                 "Set APIFY_API_TOKEN in .env (local) or the 'apify-api-token' "
                 "Secret Manager secret (production)."
             ),
+        )
+
+    logger.info("── VERIFYING ACTOR RUN  actor_run_id=%s", actor_run_id)
+    verified_run = await _verify_actor_run(actor_run_id, settings.apify_api_token)
+    verified_status = verified_run.get("status")
+    if verified_status != "SUCCEEDED":
+        logger.warning(
+            "Verified actor run status is not SUCCEEDED: status=%s actor_run_id=%s",
+            verified_status,
+            actor_run_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Verified actor run status is '{verified_status}', expected 'SUCCEEDED'",
+        )
+
+    verified_act_id = verified_run.get("actId") or verified_run.get("actorId")
+    if settings.apify_allowed_actor_ids and verified_act_id not in settings.apify_allowed_actor_ids:
+        logger.warning(
+            "Verified actor run actId=%s is not in allowed actor IDs: %s",
+            verified_act_id,
+            settings.apify_allowed_actor_ids,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Verified actor ID '{verified_act_id}' is not authorized",
+        )
+
+    verified_dataset_id = (verified_run.get("defaultDatasetId") or "").strip()
+    if verified_dataset_id and verified_dataset_id != dataset_id:
+        logger.error(
+            "Dataset ID mismatch: payload specifies '%s' but verified run produced '%s'",
+            dataset_id,
+            verified_dataset_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Dataset ID mismatch: payload specifies '{dataset_id}' but run produced '{verified_dataset_id}'",
         )
 
     logger.info("── FETCHING DATASET  dataset_id=%s", dataset_id)
@@ -289,20 +389,49 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
         ) from exc
 
     inserted_count = len(inserted_ids)
+    duplicates_count = len(jobs) - inserted_count
     logger.info(
         "── BIGQUERY PERSIST COMPLETE  novel_inserted=%d  duplicates_skipped=%d",
         inserted_count,
-        len(jobs) - inserted_count,
+        duplicates_count,
     )
 
-    # ── Step 9: Publish ONLY the newly inserted job_ids to Pub/Sub ────────────
+    # ── Step 8b: Recover saved-but-unembedded jobs from this batch on retry ─────
+    # If any jobs in this batch already exist in BigQuery but are still in NEW_RAW
+    # status (e.g. from an earlier webhook delivery where Pub/Sub publish failed),
+    # recover them so that an Apify webhook retry automatically republishes them.
+    jobs_to_publish = list(inserted_ids)
+    recovered_retry_ids: list[str] = []
+    if duplicates_count > 0:
+        all_batch_ids = [j.job_id for j in jobs]
+        existing_batch_ids = [jid for jid in all_batch_ids if jid not in set(inserted_ids)]
+        if existing_batch_ids:
+            try:
+                unembedded_existing = await repo.get_unembedded_job_ids(job_ids=existing_batch_ids)
+                if unembedded_existing:
+                    logger.info(
+                        "── RECOVERY: Found %d saved-but-unembedded job(s) in retried batch: %s",
+                        len(unembedded_existing),
+                        unembedded_existing,
+                    )
+                    recovered_retry_ids = unembedded_existing
+                    for jid in recovered_retry_ids:
+                        if jid not in jobs_to_publish:
+                            jobs_to_publish.append(jid)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Failed to query unembedded existing jobs during batch recovery: %s",
+                    exc,
+                )
+
+    # ── Step 9: Publish jobs_to_publish to Pub/Sub ────────────────────────────
 
     published_count = 0
     publish_failures = 0
-    if inserted_ids:
-        logger.info("── PUBSUB PUBLISH START  job_ids_to_publish=%d", len(inserted_ids))
+    if jobs_to_publish:
+        logger.info("── PUBSUB PUBLISH START  job_ids_to_publish=%d", len(jobs_to_publish))
         published_count, publish_failures = await _publish_job_ids(
-            inserted_ids,
+            jobs_to_publish,
             project_id=settings.gcp_project_id,
             topic=settings.pubsub_embedding_topic,
         )
@@ -314,7 +443,7 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
 
     logger.info(
         "── APIFY WEBHOOK COMPLETE  dataset_id=%s  received=%d  normalized=%d"
-        "  apply_url_fallback=%d  inserted=%d  published=%d  publish_failures=%d",
+        "  apply_url_fallback=%d  inserted=%d  published=%d  publish_failures=%d  recovered=%d",
         dataset_id,
         len(raw_items),
         len(jobs),
@@ -322,6 +451,7 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
         inserted_count,
         published_count,
         publish_failures,
+        len(recovered_retry_ids),
     )
 
     return {
@@ -333,23 +463,179 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
         "inserted": inserted_count,
         "published": published_count,
         "publish_failures": publish_failures,
+        "recovered": len(recovered_retry_ids),
+    }
+
+
+@app.post("/jobs/reconcile", status_code=status.HTTP_200_OK)
+@app.post("/reconcile", status_code=status.HTTP_200_OK)
+async def trigger_reconciliation(
+    limit: int = 100,
+    min_age_seconds: int = 0,
+) -> dict[str, Any]:
+    """Endpoint to trigger out-of-band reconciliation of saved-but-unembedded jobs."""
+    return await reconcile_unpublished_jobs(limit=limit, min_age_seconds=min_age_seconds)
+
+
+async def reconcile_unpublished_jobs(
+    *,
+    limit: int = 100,
+    min_age_seconds: int = 0,
+    repo: RawJobRepository | None = None,
+) -> dict[str, Any]:
+    """Discover and publish saved jobs that remain unembedded (status=NEW_RAW).
+
+    Guarantees that saved-but-unpublished jobs can be discovered and retried
+    independently of the original webhook (e.g. via Cloud Scheduler or manual trigger).
+
+    Args:
+        limit: Maximum number of jobs to reconcile in one run.
+        min_age_seconds: Minimum elapsed seconds since scraped_at (default 0).
+        repo: Optional RawJobRepository instance for testing/dependency injection.
+
+    Returns:
+        Summary dict containing counts of discovered, published, and failed jobs.
+    """
+    settings = get_settings()
+    active_repo = repo or RawJobRepository()
+
+    logger.info("── RECONCILIATION START  limit=%d  min_age_seconds=%d", limit, min_age_seconds)
+    unembedded_ids = await active_repo.get_unembedded_job_ids(
+        job_ids=None,
+        limit=limit,
+        min_age_seconds=min_age_seconds,
+    )
+
+    if not unembedded_ids:
+        logger.info("── RECONCILIATION COMPLETE  No unembedded jobs found")
+        return {"reconciled": 0, "published": 0, "publish_failures": 0, "job_ids": []}
+
+    logger.info(
+        "── RECONCILIATION DISCOVERED  count=%d  job_ids=%s",
+        len(unembedded_ids),
+        unembedded_ids,
+    )
+
+    published_count, publish_failures = await _publish_job_ids(
+        unembedded_ids,
+        project_id=settings.gcp_project_id,
+        topic=settings.pubsub_embedding_topic,
+    )
+
+    logger.info(
+        "── RECONCILIATION COMPLETE  reconciled=%d  published=%d  publish_failures=%d",
+        len(unembedded_ids),
+        published_count,
+        publish_failures,
+    )
+
+    return {
+        "reconciled": len(unembedded_ids),
+        "published": published_count,
+        "publish_failures": publish_failures,
+        "job_ids": unembedded_ids,
     }
 
 
 # ── Private helpers ────────────────────────────────────────────────────────────
+
+async def _verify_actor_run(
+    actor_run_id: str,
+    api_token: str,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> dict[str, Any]:
+    """Verify an Actor run directly with the Apify API.
+
+    Protects against fabricated payloads by ensuring the run exists, succeeded,
+    belongs to an authorized actor, and produced the claimed dataset ID.
+
+    Args:
+        actor_run_id: The Apify actor run ID.
+        api_token: Authenticated Apify API token. Never logged.
+        client: Optional httpx.AsyncClient for testing/dependency injection.
+
+    Returns:
+        Verified run data dict from Apify API.
+
+    Raises:
+        HTTPException: On network error, non-2xx status, or run not found.
+    """
+    url = _APIFY_ACTOR_RUN_API.format(actor_run_id=actor_run_id)
+    headers = {
+        "Authorization": f"Bearer {api_token.strip()}",
+    }
+    try:
+        if client is not None:
+            response = await client.get(url, headers=headers)
+        else:
+            async with httpx.AsyncClient(timeout=_RUN_VERIFY_TIMEOUT_S) as http_client:
+                response = await http_client.get(url, headers=headers)
+    except httpx.TimeoutException as exc:
+        logger.error("Apify Actor Run API timed out: actor_run_id=%s", actor_run_id)
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="Apify Actor Run API request timed out",
+        ) from exc
+    except httpx.RequestError as exc:
+        logger.error("Apify Actor Run API request error: actor_run_id=%s error=%s", actor_run_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Could not reach Apify Actor Run API",
+        ) from exc
+
+    if response.status_code == 404:
+        logger.error("Apify actor run not found: actor_run_id=%s", actor_run_id)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Apify actor run '{actor_run_id}' not found",
+        )
+
+    if not response.is_success:
+        logger.error(
+            "Apify Actor Run API non-2xx response: actor_run_id=%s status=%d",
+            actor_run_id,
+            response.status_code,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Apify Actor Run API returned HTTP {response.status_code}",
+        )
+
+    try:
+        data = response.json()
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Apify Actor Run API returned malformed JSON: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Apify Actor Run API returned non-JSON response",
+        ) from exc
+
+    if isinstance(data, dict) and "data" in data and isinstance(data["data"], dict):
+        return cast(dict[str, Any], data["data"])
+    if isinstance(data, dict):
+        return data
+
+    raise HTTPException(
+        status_code=status.HTTP_502_BAD_GATEWAY,
+        detail="Apify Actor Run API returned unexpected structure",
+    )
+
 
 async def _fetch_dataset_items(
     dataset_id: str,
     api_token: str,
     *,
     clean: bool = True,
+    client: httpx.AsyncClient | None = None,
 ) -> list[dict[str, Any]]:
     """Fetch all items from an Apify dataset via the Dataset Items API.
 
     Args:
         dataset_id: The Apify dataset ID (from resource.defaultDatasetId).
-        api_token: Authenticated Apify API token. Never logged.
+        api_token: Authenticated Apify API token. Never logged or placed in URL.
         clean: If True, request clean=true to omit Apify-internal metadata fields.
+        client: Optional httpx.AsyncClient for testing/dependency injection.
 
     Returns:
         List of raw dataset item dicts.
@@ -358,16 +644,21 @@ async def _fetch_dataset_items(
         HTTPException: On API auth failure, invalid dataset, timeout, or HTTP error.
     """
     url = _APIFY_DATASET_API.format(dataset_id=dataset_id)
+    headers = {
+        "Authorization": f"Bearer {api_token.strip()}",
+    }
     params: dict[str, str | int] = {
-        "token": api_token,  # passed as query param per Apify API convention
         "format": "json",
     }
     if clean:
         params["clean"] = "true"
 
     try:
-        async with httpx.AsyncClient(timeout=_DATASET_FETCH_TIMEOUT_S) as client:
-            response = await client.get(url, params=params)
+        if client is not None:
+            response = await client.get(url, headers=headers, params=params)
+        else:
+            async with httpx.AsyncClient(timeout=_DATASET_FETCH_TIMEOUT_S) as http_client:
+                response = await http_client.get(url, headers=headers, params=params)
     except httpx.TimeoutException as exc:
         logger.error("Apify Dataset API timed out: dataset_id=%s", dataset_id)
         raise HTTPException(
