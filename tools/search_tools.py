@@ -21,7 +21,9 @@ _DEFAULT_TIMEOUT = 15.0  # seconds
 _MAX_CONTENT_BYTES = 50_000  # cap returned content to avoid token bloat
 
 # Simple user-agent to avoid bot blocks on public pages
-_USER_AGENT = "Mozilla/5.0 (compatible; AgenticJobHarvester/1.0; Research bot; contact@example.com)"
+_USER_AGENT = (
+    "Mozilla/5.0 (compatible; AgenticJobHarvester/1.0; Research bot; contact@example.com)"
+)
 
 
 async def google_search(query: str, num_results: int = 5) -> list[dict[str, str]]:
@@ -72,13 +74,11 @@ async def google_search(query: str, num_results: int = 5) -> list[dict[str, str]
 
             results = []
             for item in data.get("items", []):
-                results.append(
-                    {
-                        "title": item.get("title", ""),
-                        "url": item.get("link", ""),
-                        "snippet": item.get("snippet", ""),
-                    }
-                )
+                results.append({
+                    "title": item.get("title", ""),
+                    "url": item.get("link", ""),
+                    "snippet": item.get("snippet", ""),
+                })
             logger.info("google_search('%s') returned %d results", query, len(results))
             return results
 
@@ -113,7 +113,7 @@ async def fetch_url(url: str, extract_text: bool = True) -> str:
         try:
             response = await client.get(url)
             response.raise_for_status()
-            content = response.text[: _MAX_CONTENT_BYTES * 4]  # over-fetch then trim
+            content = response.text[:_MAX_CONTENT_BYTES * 4]  # over-fetch then trim
 
             if extract_text:
                 content = _strip_html(content)

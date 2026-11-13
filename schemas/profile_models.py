@@ -14,8 +14,6 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, HttpUrl
 
-from utils.time import utcnow
-
 
 class ResumeMetadata(BaseModel):
     """LLM-extracted structured metadata from a user's resume."""
@@ -25,9 +23,7 @@ class ResumeMetadata(BaseModel):
     total_yoe: float = Field(..., ge=0, le=60, description="Total years of relevant experience")
     current_title: str
     target_titles: list[str] = Field(
-        ...,
-        min_length=1,
-        max_length=10,
+        ..., min_length=1, max_length=10,
         description="Roles the user is actively targeting",
     )
     top_skills: list[str] = Field(..., min_length=1, max_length=50)
@@ -61,27 +57,22 @@ class UserProfile(BaseModel):
     resume_metadata: ResumeMetadata
     # Embedding vectors stored as JSON-serialized lists; BigQuery FLOAT64 REPEATED
     e_resume: list[float] = Field(
-        ...,
-        min_length=768,
-        max_length=768,
-        description="768-dim text-embedding-004 of resume text (base vector)",
+        ..., min_length=768, max_length=768,
+        description="768-dim text-embedding-004 of resume text (base vector)"
     )
     e_active_user: list[float] = Field(
-        ...,
-        min_length=768,
-        max_length=768,
-        description="768-dim active centroid: (1-α)*e_resume + α*e_accepted_centroid",
+        ..., min_length=768, max_length=768,
+        description="768-dim active centroid: (1-α)*e_resume + α*e_accepted_centroid"
     )
     active_vector_alpha: float = Field(
-        0.0,
-        ge=0.0,
-        le=1.0,
-        description="Current α used in centroid blend; 0.0 = pure resume, 1.0 = pure accepted jobs",
+        0.0, ge=0.0, le=1.0,
+        description="Current α used in centroid blend; 0.0 = pure resume, 1.0 = pure accepted jobs"
     )
     notification_threshold_score: int = Field(
-        85, ge=0, le=100, description="Minimum agreed_score to trigger Telegram notification"
+        85, ge=0, le=100,
+        description="Minimum agreed_score to trigger Telegram notification"
     )
     is_active: bool = True
-    created_at: datetime = Field(default_factory=utcnow)
-    updated_at: datetime = Field(default_factory=utcnow)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
     last_reflection_at: Optional[datetime] = None

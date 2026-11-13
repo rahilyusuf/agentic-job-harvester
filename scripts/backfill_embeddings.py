@@ -34,9 +34,7 @@ async def backfill(limit: int, batch_size: int) -> None:
     offset = 0
 
     while total_processed < limit:
-        batch = await raw_repo.get_jobs_pending_embedding(
-            limit=min(batch_size, limit - total_processed)
-        )
+        batch = await raw_repo.get_jobs_pending_embedding(limit=min(batch_size, limit - total_processed))
         if not batch:
             logger.info("No more jobs to embed. Done.")
             break
@@ -54,7 +52,9 @@ async def backfill(limit: int, batch_size: int) -> None:
                 logger.error("Failed to embed job_id=%s: %s", job.job_id, exc)
                 total_failed += 1
 
-    logger.info("Backfill complete: %d embedded, %d failed.", total_processed, total_failed)
+    logger.info(
+        "Backfill complete: %d embedded, %d failed.", total_processed, total_failed
+    )
 
 
 if __name__ == "__main__":

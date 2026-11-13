@@ -1,7 +1,7 @@
-<!-- # Primary Agent System Rules — `agentic-job-harvester-v2`
+<!-- # Primary Agent System Rules — `agentic-job-harvester`
 
 ## Project Mission
-You are assisting a Principal AI Engineer building `agentic-job-harvester-v2`: an enterprise-grade multi-agent job intelligence and due-diligence platform built with Python, Google ADK (`google-adk`), BigQuery Native Vector Search, LiteLLM Proxy, Instructor, E2B Sandboxing, and LangFuse Observability.
+You are assisting a Principal AI Engineer building `agentic-job-harvester`: an enterprise-grade multi-agent job intelligence and due-diligence platform built with Python, Google ADK (`google-adk`), BigQuery Native Vector Search, LiteLLM Proxy, Instructor, E2B Sandboxing, and LangFuse Observability.
 
 ## Core Directives
 1. **Source of Truth**: Always follow `ARCHITECTURE.md` (LLD v3.1). Never modify the pipeline topology or invent alternative LLM scoring paths without explicit instruction.
@@ -35,7 +35,7 @@ targeting the MENA market (Saudi Arabia, UAE).
 ## Project Layout
 
 ```
-agentic-job-harvester-v2/
+agentic-job-harvester/
 ├── agents/                      ← ADK agent classes (one file per agent)
 │   ├── base.py                  ← BaseIntelligenceAgent (Instructor + LiteLLM + LangFuse wrapper)
 │   ├── router_agent.py          ← JobIntakeRouter

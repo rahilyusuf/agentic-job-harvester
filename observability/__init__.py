@@ -1,19 +1,5 @@
-"""observability — LangFuse v4 setup and trace scoring helpers."""
+"""observability — LangFuse OpenTelemetry setup and trace scoring helpers."""
 
-from observability.setup import (
-    flush_observability,
-    get_langfuse,
-    observe,
-    score_trace,
-    setup_observability,
-    update_current_span,
-)
+from observability.setup import get_langfuse, observe, score_trace, setup_observability
 
-__all__ = [
-    "setup_observability",
-    "flush_observability",
-    "get_langfuse",
-    "observe",
-    "update_current_span",
-    "score_trace",
-]
+__all__ = ["setup_observability", "get_langfuse", "observe", "score_trace"]

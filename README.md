@@ -34,8 +34,8 @@ Detailed folder hierarchy and dependency rules are defined in [`PROJECT_STRUCTUR
 
 ```bash
 # 1. Clone repository
-git clone [https://github.com/](https://github.com/)<your-github-username>/agentic-job-harvester-v2.git
-cd agentic-job-harvester-v2
+git clone [https://github.com/](https://github.com/)<your-github-username>/agentic-job-harvester.git
+cd agentic-job-harvester
 
 # 2. Create virtual environment
 python3 -m venv .venv

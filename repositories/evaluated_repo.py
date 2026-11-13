@@ -28,10 +28,7 @@ class EvaluatedRepository:
         dataset: str | None = None,
     ) -> None:
         settings = get_settings()
-        self._client = bq_client or bigquery.Client(
-            project=settings.gcp_project_id,
-            location=settings.bq_location,
-        )
+        self._client = bq_client or bigquery.Client(project=settings.gcp_project_id)
         self._dataset = dataset or settings.bq_dataset
         self._project = settings.gcp_project_id
         self._table = f"{self._project}.{self._dataset}.job_evaluated"
@@ -102,7 +99,9 @@ class EvaluatedRepository:
         return [self._row_to_model(row) for row in self._client.query_and_wait(query)]
 
     @async_retry(max_attempts=3, base_delay=1.0)
-    async def update_tier2_status(self, job_id: str, user_id: str, tier2_status: str) -> None:
+    async def update_tier2_status(
+        self, job_id: str, user_id: str, tier2_status: str
+    ) -> None:
         query = f"""
             UPDATE `{self._table}`
             SET tier2_status = '{tier2_status}'

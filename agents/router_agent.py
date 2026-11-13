@@ -17,7 +17,6 @@ from google.cloud import firestore
 from agents.base import BaseIntelligenceAgent
 from config.settings import get_settings
 from observability.setup import observe
-from orchestration.input_sanitizer import format_job_for_prompt
 from schemas.job_models import RawJob
 from schemas.routing_models import RouterDecision
 
@@ -68,13 +67,17 @@ class JobIntakeRouter(BaseIntelligenceAgent):
         user_context: str,
     ) -> list[dict[str, str]]:
         rules_text = json.dumps(preference_rules, indent=2) if preference_rules else "No rules yet."
-        job_block = format_job_for_prompt(job, max_description_chars=1500)
         return [
             self._system_message(),
             self._user_message(
                 f"## User Context\n{user_context}\n\n"
                 f"## Dynamic Preference Rules\n{rules_text}\n\n"
-                f"## Job Posting\n{job_block}\n\n"
+                f"## Job Posting\n"
+                f"Title: {job.title}\n"
+                f"Company: {job.company}\n"
+                f"Location: {job.location or 'Not specified'}\n"
+                f"Employment: {job.employment_type_raw or 'Not specified'}\n"
+                f"Description (first 1500 chars):\n{job.description[:1500]}\n\n"
                 f"Make a routing decision. job_id={job.job_id}"
             ),
         ]
@@ -97,8 +100,6 @@ class JobIntakeRouter(BaseIntelligenceAgent):
         decision: RouterDecision = await self._call_llm(  # type: ignore[assignment]
             messages=messages,
             trace_id=self._new_trace_id(),
-            user_id=user_id,
-            session_id=job.job_id,
         )
         logger.info(
             "Router decision: job_id=%s decision=%s confidence=%.2f",
@@ -111,7 +112,10 @@ class JobIntakeRouter(BaseIntelligenceAgent):
     async def _load_preference_rules(self, user_id: str) -> list[dict]:
         """Load dynamic_preference_rules from Firestore for the given user."""
         try:
-            doc_ref = self._fs.collection(_PREFERENCE_RULES_COLLECTION).document(user_id)
+            doc_ref = (
+                self._fs.collection(_PREFERENCE_RULES_COLLECTION)
+                .document(user_id)
+            )
             doc = await doc_ref.get()
             if doc.exists:
                 data = doc.to_dict() or {}

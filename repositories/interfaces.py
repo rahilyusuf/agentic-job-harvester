@@ -20,7 +20,6 @@ from schemas.scoring_models import ScorerOutput, SkepticOutput
 
 # ── Raw Jobs ───────────────────────────────────────────────────────────────────
 
-
 @runtime_checkable
 class IRawJobRepository(Protocol):
     """Protocol for raw_job_postings table access."""
@@ -29,8 +28,8 @@ class IRawJobRepository(Protocol):
         """Insert a new job record. No-op if job_id already exists within dedup window."""
         ...
 
-    async def batch_insert_jobs(self, jobs: list[RawJob]) -> list[str]:
-        """Batch insert jobs. Returns list of newly inserted job_ids (empty if all duplicates)."""
+    async def batch_insert_jobs(self, jobs: list[RawJob]) -> int:
+        """Batch insert jobs. Returns number of novel (non-duplicate) jobs inserted."""
         ...
 
     async def exists(self, job_id: str) -> bool:
@@ -49,18 +48,8 @@ class IRawJobRepository(Protocol):
         """Return jobs with status=EMBEDDING_QUEUED, ordered by scraped_at ASC."""
         ...
 
-    async def get_unembedded_job_ids(
-        self,
-        job_ids: list[str] | None = None,
-        limit: int = 100,
-        min_age_seconds: int = 0,
-    ) -> list[str]:
-        """Fetch job IDs saved in raw_job_postings that remain unembedded (status=NEW_RAW)."""
-        ...
-
 
 # ── Embeddings ─────────────────────────────────────────────────────────────────
-
 
 @runtime_checkable
 class IEmbeddingRepository(Protocol):
@@ -95,7 +84,6 @@ class IEmbeddingRepository(Protocol):
 
 # ── Evaluated Jobs ─────────────────────────────────────────────────────────────
 
-
 @runtime_checkable
 class IEvaluatedRepository(Protocol):
     """Protocol for job_evaluated table access."""
@@ -117,7 +105,9 @@ class IEvaluatedRepository(Protocol):
         """Return top-scoring jobs for a user above the notification threshold."""
         ...
 
-    async def update_tier2_status(self, job_id: str, user_id: str, tier2_status: str) -> None:
+    async def update_tier2_status(
+        self, job_id: str, user_id: str, tier2_status: str
+    ) -> None:
         """Update the tier2_status field for optimistic locking."""
         ...
 
@@ -127,7 +117,6 @@ class IEvaluatedRepository(Protocol):
 
 
 # ── User Actions (HITL Telemetry) ─────────────────────────────────────────────
-
 
 @runtime_checkable
 class IActionsRepository(Protocol):
@@ -161,7 +150,6 @@ class IActionsRepository(Protocol):
 
 
 # ── User Profiles ──────────────────────────────────────────────────────────────
-
 
 @runtime_checkable
 class IProfileRepository(Protocol):

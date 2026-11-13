@@ -29,10 +29,7 @@ class ProfileRepository:
         dataset: str | None = None,
     ) -> None:
         settings = get_settings()
-        self._client = bq_client or bigquery.Client(
-            project=settings.gcp_project_id,
-            location=settings.bq_location,
-        )
+        self._client = bq_client or bigquery.Client(project=settings.gcp_project_id)
         self._dataset = dataset or settings.bq_dataset
         self._project = settings.gcp_project_id
         self._table = f"{self._project}.{self._dataset}.user_profiles"
@@ -58,9 +55,7 @@ class ProfileRepository:
         errors = self._client.insert_rows_json(self._table, [row])
         if errors:
             # For updates, try a DML query
-            logger.warning(
-                "Streaming insert failed; attempting DML for user_id=%s", profile.user_id
-            )
+            logger.warning("Streaming insert failed; attempting DML for user_id=%s", profile.user_id)
             e_active = json.dumps(profile.e_active_user)
             e_resume = json.dumps(profile.e_resume)
             query = f"""

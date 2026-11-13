@@ -1,17 +1,14 @@
 [build-system]
 requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
+build-backend = "setuptools.backends.legacy:build"
 
 [project]
-name = "agentic-job-harvester-v2"
+name = "agentic-job-harvester"
 version = "0.1.0"
 description = "Enterprise-grade multi-agent job intelligence & due-diligence platform"
 requires-python = ">=3.11"
 readme = "README.md"
 license = { text = "Proprietary" }
-
-[tool.setuptools.packages.find]
-include = ["agents*", "config*", "gateway*", "observability*", "orchestration*", "repositories*", "retrieval*", "schemas*", "services*", "tools*", "utils*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -61,10 +58,3 @@ omit = ["tests/*", "scripts/*", "venv/*"]
 [tool.coverage.report]
 fail_under = 70
 show_missing = true
-
-[tool.poe.tasks]
-dev = "python -m uvicorn services.apify_receiver:app --host 127.0.0.1 --port 8080 --reload"
-test = "python -m pytest tests/"
-lint = "python -m ruff check ."
-format = "python -m ruff format ."
-bootstrap = "python scripts/local_bootstrap.py"

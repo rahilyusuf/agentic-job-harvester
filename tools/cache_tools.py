@@ -42,7 +42,6 @@ def _get_firestore() -> firestore.AsyncClient:
 def _normalise_company_name(company: str) -> str:
     """Normalise company name to a safe Firestore document ID."""
     import re
-
     return re.sub(r"[^a-z0-9_-]", "_", company.lower().strip())[:100]
 
 
@@ -79,7 +78,6 @@ async def lookup_research_cache(company_name: str) -> dict | None:
 
         if cached_at_str:
             from datetime import datetime
-
             cached_at = datetime.fromisoformat(str(cached_at_str))
             if cached_at.tzinfo is None:
                 cached_at = cached_at.replace(tzinfo=timezone.utc)
@@ -87,9 +85,7 @@ async def lookup_research_cache(company_name: str) -> dict | None:
             if age_hours > cache_ttl_hours:
                 logger.info(
                     "Cache expired for company='%s' (age=%.1fh ttl=%dh)",
-                    company_name,
-                    age_hours,
-                    cache_ttl_hours,
+                    company_name, age_hours, cache_ttl_hours,
                 )
                 return None
 

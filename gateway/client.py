@@ -18,12 +18,14 @@ Usage in agents:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from functools import lru_cache
 from typing import Any
 
 import instructor
 import litellm
+from google.cloud import aiplatform
 from pydantic import BaseModel
 
 from config.settings import get_settings
@@ -40,8 +42,8 @@ def _configure_litellm() -> None:
     litellm.api_key = settings.litellm_proxy_api_key
     # LangFuse callback is already wired in litellm_config.yaml on the proxy side;
     # this client-side registration ensures local/test runs also emit traces.
-    litellm.success_callback = ["langfuse_otel"]
-    litellm.failure_callback = ["langfuse_otel"]
+    litellm.success_callback = ["langfuse"]
+    litellm.failure_callback = ["langfuse"]
 
 
 # Initialise once at import time
@@ -120,42 +122,63 @@ def get_instructor_client() -> GatewayClient:
 
 
 # ── Embedding helper ───────────────────────────────────────────────────────────
-# Routes through LiteLLM proxy — never calls Vertex AI / aiplatform directly.
-# LiteLLM handles authentication to the Vertex AI backend server-side;
-# this application code never imports google-cloud-aiplatform.
 
 _EMBEDDING_MODEL = "text-embedding-004"
 _EMBEDDING_DIMENSIONS = 768
 
 
 async def generate_embedding(text: str) -> list[float]:
-    """Generate a 768-dim embedding via LiteLLM proxy (text-embedding-004).
+    """Generate a 768-dim embedding using text-embedding-004.
 
     Input must follow the contract:
         f"{title} {company} {location} {description[:2000]}"
 
     This is the ONLY place text-embedding-004 is called in the project.
-    All embedding generation routes through here — never call the Vertex AI
-    SDK (aiplatform / aiplatform_v1beta1) directly from application code.
+    All embedding generation routes through here.
 
     Args:
         text: Pre-formatted text string (title + company + location + description[:2000]).
 
     Returns:
         768-dimensional float list suitable for BigQuery FLOAT64 REPEATED column.
-
-    Raises:
-        ValueError: If the returned embedding has unexpected dimensionality.
     """
-    _ensure_litellm_configured()
+    settings = get_settings()
 
-    response = await litellm.aembedding(
-        model=_EMBEDDING_MODEL,
-        input=[text],
+    # Initialise Vertex AI for the embedding call
+    aiplatform.init(project=settings.gcp_project_id, location=settings.gcp_region)
+
+    # Run in thread executor to avoid blocking the event loop
+    loop = asyncio.get_event_loop()
+    embedding = await loop.run_in_executor(None, _blocking_embed, text, settings.gcp_project_id)
+    return embedding
+
+
+def _blocking_embed(text: str, project_id: str) -> list[float]:
+    """Blocking embedding call — run via executor inside generate_embedding()."""
+    from google.cloud.aiplatform_v1beta1 import PredictionServiceClient
+    from google.cloud.aiplatform_v1beta1.types import PredictRequest
+    from google.protobuf import struct_pb2
+
+    client = PredictionServiceClient(
+        client_options={"api_endpoint": "us-central1-aiplatform.googleapis.com"}
     )
-    values: list[float] = response.data[0]["embedding"]
+    endpoint = (
+        f"projects/{project_id}/locations/us-central1"
+        f"/publishers/google/models/{_EMBEDDING_MODEL}"
+    )
 
-    if len(values) != _EMBEDDING_DIMENSIONS:
-        raise ValueError(f"Expected {_EMBEDDING_DIMENSIONS}-dim embedding, got {len(values)}")
-    logger.debug("Embedding generated: dims=%d text_len=%d", len(values), len(text))
-    return values
+    instance = struct_pb2.Value()
+    instance.struct_value.fields["content"].string_value = text[:10000]  # hard cap
+
+    request = PredictRequest(endpoint=endpoint, instances=[instance])
+    response = client.predict(request=request)
+
+    values: list[float] = list(response.predictions[0].struct_value.fields["embeddings"]
+                                .struct_value.fields["values"].list_value.values)
+    values_float = [v.number_value for v in values]
+
+    if len(values_float) != _EMBEDDING_DIMENSIONS:
+        raise ValueError(
+            f"Expected {_EMBEDDING_DIMENSIONS}-dim embedding, got {len(values_float)}"
+        )
+    return values_float

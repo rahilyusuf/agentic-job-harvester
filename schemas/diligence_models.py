@@ -13,14 +13,12 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, model_validator
 
-from utils.time import utcnow
-
 
 class RedFlagSeverity(str, enum.Enum):
-    CRITICAL = "CRITICAL"  # Immediate SKIP regardless of score
-    HIGH = "HIGH"  # Strong signal to pass
-    MEDIUM = "MEDIUM"  # Worth noting, not disqualifying
-    LOW = "LOW"  # Minor concern
+    CRITICAL = "CRITICAL"   # Immediate SKIP regardless of score
+    HIGH = "HIGH"           # Strong signal to pass
+    MEDIUM = "MEDIUM"       # Worth noting, not disqualifying
+    LOW = "LOW"             # Minor concern
 
 
 class RedFlag(BaseModel):
@@ -31,9 +29,7 @@ class RedFlag(BaseModel):
         description="ghost_job | toxic_culture | unrealistic_skills | agency_disguise | stale_listing | other",
     )
     severity: RedFlagSeverity
-    evidence: str = Field(
-        ..., min_length=10, description="Specific evidence found (URL, quote, etc.)"
-    )
+    evidence: str = Field(..., min_length=10, description="Specific evidence found (URL, quote, etc.)")
     description: str = Field(..., min_length=20)
 
 
@@ -45,23 +41,19 @@ class RedFlagAnalysis(BaseModel):
     job_id: str
     flags: list[RedFlag] = Field(default_factory=list)
     ghost_job_probability: float = Field(
-        ...,
-        ge=0.0,
-        le=1.0,
-        description="Estimated probability this is a ghost/evergreen job (>60 days active)",
+        ..., ge=0.0, le=1.0,
+        description="Estimated probability this is a ghost/evergreen job (>60 days active)"
     )
     glassdoor_toxicity_score: float | None = Field(
-        None,
-        ge=0.0,
-        le=1.0,
-        description="Normalized toxicity score from Glassdoor scrape if available",
+        None, ge=0.0, le=1.0,
+        description="Normalized toxicity score from Glassdoor scrape if available"
     )
     has_critical_flags: bool = False
     overall_recommendation: str = Field(
         ...,
         description="PROCEED | CAUTION | AVOID — final recommendation based on flags",
     )
-    analyzed_at: datetime = Field(default_factory=utcnow)
+    analyzed_at: datetime = Field(default_factory=datetime.utcnow)
 
     @model_validator(mode="after")
     def sync_critical_flags(self) -> "RedFlagAnalysis":
@@ -118,7 +110,7 @@ class SkillGapReport(BaseModel):
         ...,
         description="READY | MINOR_GAPS | SIGNIFICANT_GAPS | NOT_QUALIFIED",
     )
-    analyzed_at: datetime = Field(default_factory=utcnow)
+    analyzed_at: datetime = Field(default_factory=datetime.utcnow)
 
     @model_validator(mode="after")
     def compute_gap_counts(self) -> "SkillGapReport":

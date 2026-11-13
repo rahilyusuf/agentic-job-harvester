@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 
 from config.settings import get_settings
 from gateway.client import generate_embedding
-from observability.setup import flush_observability, setup_observability
+from observability.setup import setup_observability
 from repositories.embeddings_repo import EmbeddingRepository
 from repositories.raw_jobs_repo import RawJobRepository
 from schemas.job_models import JobStatus, RawJob
@@ -29,20 +29,9 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # type: ignore[type-arg]
-    _LOG_FORMAT = "%(asctime)s %(levelname)-8s %(name)s  %(message)s"
-    _LOG_DATEFMT = "%Y-%m-%dT%H:%M:%S"
-    root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)
-    if not root_logger.handlers:
-        import sys
-
-        _handler = logging.StreamHandler(sys.stdout)
-        _handler.setFormatter(logging.Formatter(fmt=_LOG_FORMAT, datefmt=_LOG_DATEFMT))
-        root_logger.addHandler(_handler)
     setup_observability()
     logger.info("embedding-worker started")
     yield
-    flush_observability()
     logger.info("embedding-worker shutting down")
 
 
@@ -118,5 +107,4 @@ async def _process_job(job_id: str) -> None:
 
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run("services.embedding_worker:app", host="0.0.0.0", port=8080, workers=1)

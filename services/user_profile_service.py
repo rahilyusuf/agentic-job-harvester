@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 
 from config.settings import get_settings
 from gateway.client import generate_embedding
-from observability.setup import flush_observability, setup_observability
+from observability.setup import setup_observability
 from repositories.profiles_repo import ProfileRepository
 from schemas.profile_models import ResumeMetadata, UserProfile
 
@@ -29,21 +29,8 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # type: ignore[type-arg]
-    _LOG_FORMAT = "%(asctime)s %(levelname)-8s %(name)s  %(message)s"
-    _LOG_DATEFMT = "%Y-%m-%dT%H:%M:%S"
-    root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)
-    if not root_logger.handlers:
-        import sys
-
-        _handler = logging.StreamHandler(sys.stdout)
-        _handler.setFormatter(logging.Formatter(fmt=_LOG_FORMAT, datefmt=_LOG_DATEFMT))
-        root_logger.addHandler(_handler)
     setup_observability()
-    logger.info("user-profile-service started")
     yield
-    flush_observability()
-    logger.info("user-profile-service shutting down")
 
 
 app = FastAPI(
@@ -55,7 +42,6 @@ app = FastAPI(
 
 
 # ── Request Models ─────────────────────────────────────────────────────────────
-
 
 class CreateProfileRequest(BaseModel):
     """Request body for profile creation/update."""
@@ -77,7 +63,6 @@ class CreateProfileRequest(BaseModel):
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
-
 
 @app.get("/health")
 async def health() -> dict[str, str]:
@@ -150,12 +135,10 @@ async def create_or_update_profile(request: CreateProfileRequest) -> dict[str, A
         "user_id": request.user_id,
         "status": "created" if existing is None else "updated",
         "e_resume_dims": len(e_resume),
-        "centroid_reset": existing is None
-        or existing.resume_metadata.resume_text_hash != resume_hash,
+        "centroid_reset": existing is None or existing.resume_metadata.resume_text_hash != resume_hash,
     }
 
 
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run("services.user_profile_service:app", host="0.0.0.0", port=8080, workers=1)

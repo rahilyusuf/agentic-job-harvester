@@ -85,12 +85,10 @@ class ReflectionAgent(BaseIntelligenceAgent):
     ) -> list[dict[str, str]]:
         applied_text = "\n".join(f"- {s}" for s in applied_summaries[:20]) or "None"
         passed_text = "\n".join(f"- {s}" for s in passed_summaries[:20]) or "None"
-        existing_text = (
-            "\n".join(
-                f"- {r.get('condition', '')} ({r.get('action', '')})" for r in existing_rules[:10]
-            )
-            or "No existing rules."
-        )
+        existing_text = "\n".join(
+            f"- {r.get('condition', '')} ({r.get('action', '')})"
+            for r in existing_rules[:10]
+        ) or "No existing rules."
 
         return [
             self._system_message(),
@@ -140,7 +138,10 @@ class ReflectionAgent(BaseIntelligenceAgent):
                 e_accepted = np.mean(accepted_embeddings, axis=0).tolist()
                 alpha = min(new_alpha + 0.05, _DEFAULT_ALPHA)  # drift slowly toward accepted
                 e_resume = profile.e_resume
-                new_centroid = [(1 - alpha) * r + alpha * a for r, a in zip(e_resume, e_accepted)]
+                new_centroid = [
+                    (1 - alpha) * r + alpha * a
+                    for r, a in zip(e_resume, e_accepted)
+                ]
                 new_alpha = alpha
                 centroid_updated = True
 
@@ -189,7 +190,11 @@ class ReflectionAgent(BaseIntelligenceAgent):
 
     async def _load_existing_rules(self, user_id: str) -> list[dict]:
         try:
-            doc = await self._fs.collection(_PREFERENCE_RULES_COLLECTION).document(user_id).get()
+            doc = await (
+                self._fs.collection(_PREFERENCE_RULES_COLLECTION)
+                .document(user_id)
+                .get()
+            )
             if doc.exists:
                 return (doc.to_dict() or {}).get("rules", [])
         except Exception as exc:  # noqa: BLE001
