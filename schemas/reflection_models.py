@@ -12,8 +12,6 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-from utils.time import utcnow
-
 
 class RuleAction(str, enum.Enum):
     BOOST = "BOOST"         # Increase score for matching jobs
@@ -64,7 +62,7 @@ class PreferenceRule(BaseModel):
         max_length=5,
         description="Sample job_ids that evidence this rule",
     )
-    created_at: datetime = Field(default_factory=utcnow)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
     expires_at: datetime | None = Field(
         None, description="Optional TTL; None means the rule persists until overwritten"
     )
@@ -86,7 +84,7 @@ class PreferenceRules(BaseModel):
     )
     accepted_jobs_count: int = Field(..., ge=0)
     passed_jobs_count: int = Field(..., ge=0)
-    synthesized_at: datetime = Field(default_factory=utcnow)
+    synthesized_at: datetime = Field(default_factory=datetime.utcnow)
     reflection_trace_id: str | None = Field(
         None, description="LangFuse trace ID for this reflection run"
     )

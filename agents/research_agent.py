@@ -142,10 +142,7 @@ class CompanyResearchAgent(BaseIntelligenceAgent):
         # Synthesise via LLM
         messages = self._build_messages(job=job, user_id=user_id, tool_results=tool_results)
         research: CompanyResearch = await self._call_llm(  # type: ignore[assignment]
-            messages=messages,
-            trace_id=self._new_trace_id(),
-            user_id=user_id,
-            session_id=job.job_id,
+            messages=messages, trace_id=self._new_trace_id()
         )
 
         # Override computed fields

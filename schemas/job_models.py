@@ -14,8 +14,6 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
-from utils.time import utcnow
-
 
 class JobStatus(str, enum.Enum):
     """State machine for a job record's lifecycle."""
@@ -44,7 +42,7 @@ class RawJob(BaseModel):
 
     job_id: str = Field(..., description="ATS UUID or MD5(job_url)")
     source: str = Field(..., description="Apify actor ID or n8n workflow name")
-    scraped_at: datetime = Field(default_factory=utcnow)
+    scraped_at: datetime = Field(default_factory=datetime.utcnow)
     job_url: HttpUrl
     title: str
     company: str
@@ -112,7 +110,7 @@ class EvaluatedJob(BaseModel):
     skeptic_rationale: str
     disqualifiers: list[str] = Field(default_factory=list)
     strengths: list[str] = Field(default_factory=list)
-    evaluated_at: datetime = Field(default_factory=utcnow)
+    evaluated_at: datetime = Field(default_factory=datetime.utcnow)
     notified_at: Optional[datetime] = None
     tier2_status: Optional[str] = Field(
         None, description="NULL | PENDING | IN_PROGRESS | COMPLETE"

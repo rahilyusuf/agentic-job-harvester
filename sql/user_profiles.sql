@@ -9,11 +9,11 @@ CREATE TABLE IF NOT EXISTS `${GCP_PROJECT_ID}.${BQ_DATASET}.user_profiles` (
     telegram_chat_id            STRING,
     resume_gcs_uri              STRING    NOT NULL,   -- gs://bucket/path/resume.pdf
     resume_metadata             STRING    NOT NULL,   -- JSON-serialized ResumeMetadata
-    e_resume                    ARRAY<FLOAT64>,            -- 768-dim base embedding
-    e_active_user               ARRAY<FLOAT64>,            -- 768-dim active centroid
-    active_vector_alpha         FLOAT64   DEFAULT 0.0 NOT NULL,
-    notification_threshold_score INT64   DEFAULT 85 NOT NULL,
-    is_active                   BOOL      DEFAULT TRUE NOT NULL,
+    e_resume                    ARRAY<FLOAT64> NOT NULL,   -- 768-dim base embedding
+    e_active_user               ARRAY<FLOAT64> NOT NULL,   -- 768-dim active centroid
+    active_vector_alpha         FLOAT64   NOT NULL DEFAULT 0.0,
+    notification_threshold_score INT64   NOT NULL DEFAULT 85,
+    is_active                   BOOL      NOT NULL DEFAULT TRUE,
     created_at                  TIMESTAMP NOT NULL,
     updated_at                  TIMESTAMP NOT NULL,
     last_reflection_at          TIMESTAMP,

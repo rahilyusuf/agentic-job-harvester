@@ -285,7 +285,3 @@ scripts/__output__/
 # Profiling output
 *.prof
 *.pstats
-
-installed-packages.txt
-
-

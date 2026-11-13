@@ -116,8 +116,6 @@ class SkillGapAgent(BaseIntelligenceAgent):
         gap_output: _GapIdentificationOutput = await self._call_llm(  # type: ignore[assignment]
             messages=gap_messages,
             trace_id=tid,
-            user_id=user_id,
-            session_id=job.job_id,
         )
 
         # Step 2: Generate and execute E2B challenges for blocking gaps (concurrently)

@@ -16,7 +16,7 @@ import logging
 import sys
 
 from config.settings import get_settings
-from observability.setup import flush_observability, setup_observability
+from observability.setup import setup_observability
 from orchestration.pipeline import build_tier1_pipeline
 from repositories.actions_repo import ActionsRepository
 from repositories.embeddings_repo import EmbeddingRepository
@@ -128,14 +128,8 @@ async def main() -> None:
             total_stats["errors"] += 1
 
     logger.info("Tier1 runner complete: %s", total_stats)
-    flush_observability()
 
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        stream=sys.stdout,
-        format="%(asctime)s %(levelname)-8s %(name)s  %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S",
-    )
+    logging.basicConfig(level=logging.INFO, stream=sys.stdout)
     asyncio.run(main())

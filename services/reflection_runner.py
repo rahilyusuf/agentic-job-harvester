@@ -12,7 +12,7 @@ import logging
 import sys
 
 from config.settings import get_settings
-from observability.setup import flush_observability, setup_observability
+from observability.setup import setup_observability
 from agents.reflection_agent import ReflectionAgent
 from repositories.actions_repo import ActionsRepository
 from repositories.embeddings_repo import EmbeddingRepository
@@ -63,14 +63,8 @@ async def main() -> None:
         success_count,
         error_count,
     )
-    flush_observability()
 
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        stream=sys.stdout,
-        format="%(asctime)s %(levelname)-8s %(name)s  %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S",
-    )
+    logging.basicConfig(level=logging.INFO, stream=sys.stdout)
     asyncio.run(main())
