@@ -12,11 +12,13 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
+from utils.time import utcnow
+
 
 class RuleAction(str, enum.Enum):
-    BOOST = "BOOST"         # Increase score for matching jobs
-    PENALIZE = "PENALIZE"   # Decrease score for matching jobs
-    SKIP = "SKIP"           # Immediately skip matching jobs (hard filter)
+    BOOST = "BOOST"  # Increase score for matching jobs
+    PENALIZE = "PENALIZE"  # Decrease score for matching jobs
+    SKIP = "SKIP"  # Immediately skip matching jobs (hard filter)
     PRIORITIZE = "PRIORITIZE"  # Mark as HIGH_PRIORITY routing
 
 
@@ -50,19 +52,20 @@ class PreferenceRule(BaseModel):
         description="Score adjustment for BOOST/PENALIZE. None for SKIP/PRIORITIZE.",
     )
     confidence: float = Field(
-        ..., ge=0.0, le=1.0,
-        description="Agent confidence in this rule, based on signal strength in telemetry"
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Agent confidence in this rule, based on signal strength in telemetry",
     )
     signal_count: int = Field(
-        ..., ge=1,
-        description="Number of user actions that support this rule"
+        ..., ge=1, description="Number of user actions that support this rule"
     )
     examples: list[str] = Field(
         default_factory=list,
         max_length=5,
         description="Sample job_ids that evidence this rule",
     )
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
     expires_at: datetime | None = Field(
         None, description="Optional TTL; None means the rule persists until overwritten"
     )
@@ -79,12 +82,14 @@ class PreferenceRules(BaseModel):
         description="True if e_active_user centroid was recalculated in this run",
     )
     alpha_used: float = Field(
-        ..., ge=0.0, le=1.0,
-        description="α used in: e_active_new = (1-α)*e_resume + α*e_accepted_centroid"
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="α used in: e_active_new = (1-α)*e_resume + α*e_accepted_centroid",
     )
     accepted_jobs_count: int = Field(..., ge=0)
     passed_jobs_count: int = Field(..., ge=0)
-    synthesized_at: datetime = Field(default_factory=datetime.utcnow)
+    synthesized_at: datetime = Field(default_factory=utcnow)
     reflection_trace_id: str | None = Field(
         None, description="LangFuse trace ID for this reflection run"
     )

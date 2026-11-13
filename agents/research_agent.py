@@ -61,9 +61,7 @@ class CompanyResearchAgent(BaseIntelligenceAgent):
         user_id: str,
         tool_results: list[str],
     ) -> list[dict[str, str]]:
-        tools_context = (
-            "\n\n".join(tool_results) if tool_results else "No tool results yet."
-        )
+        tools_context = "\n\n".join(tool_results) if tool_results else "No tool results yet."
         return [
             self._system_message(),
             self._user_message(
@@ -106,10 +104,8 @@ class CompanyResearchAgent(BaseIntelligenceAgent):
                 f"{job.company} company funding headcount recent news Glassdoor", num_results=5
             )
             tool_results.append(
-                "[SEARCH] " + "\n".join(
-                    f"- {r['title']}: {r['snippet']} ({r['url']})"
-                    for r in search_results
-                )
+                "[SEARCH] "
+                + "\n".join(f"- {r['title']}: {r['snippet']} ({r['url']})" for r in search_results)
             )
             iterations += 1
 
@@ -123,6 +119,7 @@ class CompanyResearchAgent(BaseIntelligenceAgent):
             if iterations < _MAX_ITERATIONS and job.job_url:
                 # Try fetching the company homepage (strip job path)
                 from urllib.parse import urlparse
+
                 parsed = urlparse(str(job.job_url))
                 homepage = f"{parsed.scheme}://{parsed.netloc}"
                 page_content = await fetch_url(homepage)
@@ -142,7 +139,10 @@ class CompanyResearchAgent(BaseIntelligenceAgent):
         # Synthesise via LLM
         messages = self._build_messages(job=job, user_id=user_id, tool_results=tool_results)
         research: CompanyResearch = await self._call_llm(  # type: ignore[assignment]
-            messages=messages, trace_id=self._new_trace_id()
+            messages=messages,
+            trace_id=self._new_trace_id(),
+            user_id=user_id,
+            session_id=job.job_id,
         )
 
         # Override computed fields
@@ -155,6 +155,9 @@ class CompanyResearchAgent(BaseIntelligenceAgent):
 
         logger.info(
             "CompanyResearchAgent completed: job_id=%s company=%s cache_hit=%s iterations=%d",
-            job.job_id, job.company, cache_hit, iterations,
+            job.job_id,
+            job.company,
+            cache_hit,
+            iterations,
         )
         return research

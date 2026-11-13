@@ -98,9 +98,10 @@ async def test_debate_no_round_2_when_delta_small(
     from agents.scorer_agent import ScorerAgent
     from agents.skeptic_agent import SkepticAgent
 
-    with patch.object(ScorerAgent, "_call_llm", new_callable=AsyncMock) as mock_scorer_llm, \
-         patch.object(SkepticAgent, "_call_llm", new_callable=AsyncMock) as mock_skeptic_llm:
-
+    with (
+        patch.object(ScorerAgent, "_call_llm", new_callable=AsyncMock) as mock_scorer_llm,
+        patch.object(SkepticAgent, "_call_llm", new_callable=AsyncMock) as mock_skeptic_llm,
+    ):
         mock_scorer_llm.return_value = scorer_output_high
         mock_skeptic_llm.return_value = skeptic_output_no_delta
 
@@ -108,8 +109,11 @@ async def test_debate_no_round_2_when_delta_small(
         skeptic = SkepticAgent()
 
         s_out = await scorer.score(
-            job=sample_job, user_id="user_test",
-            resume_summary="Senior ML engineer", preference_rules=[], round_number=1,
+            job=sample_job,
+            user_id="user_test",
+            resume_summary="Senior ML engineer",
+            preference_rules=[],
+            round_number=1,
         )
         sk_out = await skeptic.audit(job=sample_job, user_id="user_test", scorer_output=s_out)
 
@@ -132,8 +136,10 @@ async def test_debate_triggers_round_2_on_large_delta(
 
         skeptic = SkepticAgent()
         sk_out = await skeptic.audit(
-            job=sample_job, user_id="user_test",
-            scorer_output=scorer_output_high, round_number=1,
+            job=sample_job,
+            user_id="user_test",
+            scorer_output=scorer_output_high,
+            round_number=1,
         )
 
     assert sk_out.request_round_2 is True
@@ -156,8 +162,10 @@ async def test_skeptic_veto_is_authoritative(
 
         skeptic = SkepticAgent()
         sk_out = await skeptic.audit(
-            job=sample_job, user_id="user_test",
-            scorer_output=scorer_output_high, round_number=1,
+            job=sample_job,
+            user_id="user_test",
+            scorer_output=scorer_output_high,
+            round_number=1,
         )
 
     assert sk_out.veto is True

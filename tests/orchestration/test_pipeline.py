@@ -66,9 +66,10 @@ async def test_pipeline_skip_halts_immediately(
         skip_reason="VP title excluded",
     )
 
-    with patch("orchestration.pipeline.JobIntakeRouter.route", new_callable=AsyncMock) as mock_route, \
-         patch("orchestration.pipeline.ScorerAgent.score", new_callable=AsyncMock) as mock_score:
-
+    with (
+        patch("orchestration.pipeline.JobIntakeRouter.route", new_callable=AsyncMock) as mock_route,
+        patch("orchestration.pipeline.ScorerAgent.score", new_callable=AsyncMock) as mock_score,
+    ):
         mock_route.return_value = skip_decision
 
         pipeline = build_tier1_pipeline(
@@ -125,10 +126,11 @@ async def test_pipeline_produces_evaluated_job_on_process(
         request_round_2=False,
     )
 
-    with patch("orchestration.pipeline.JobIntakeRouter.route", new_callable=AsyncMock) as mock_route, \
-         patch("orchestration.pipeline.ScorerAgent.score", new_callable=AsyncMock) as mock_score, \
-         patch("orchestration.pipeline.SkepticAgent.audit", new_callable=AsyncMock) as mock_audit:
-
+    with (
+        patch("orchestration.pipeline.JobIntakeRouter.route", new_callable=AsyncMock) as mock_route,
+        patch("orchestration.pipeline.ScorerAgent.score", new_callable=AsyncMock) as mock_score,
+        patch("orchestration.pipeline.SkepticAgent.audit", new_callable=AsyncMock) as mock_audit,
+    ):
         mock_route.return_value = process_decision
         mock_score.return_value = scorer_out
         mock_audit.return_value = skeptic_out
@@ -148,3 +150,20 @@ async def test_pipeline_produces_evaluated_job_on_process(
     assert result.evaluation.debate_rounds == 1
     assert result.evaluation.skeptic_vetoed is False
     mock_evaluated_repo.upsert_evaluation.assert_called_once()
+
+
+@pytest.mark.unit
+def test_lazy_imports_prevent_circular_dependencies() -> None:
+    """Verify that orchestration and agents packages can be imported without cycles."""
+    import agents
+    import orchestration
+
+    assert callable(orchestration.build_tier1_pipeline)
+    assert callable(orchestration.format_job_for_prompt)
+    assert orchestration.OutputValidator is not None
+    assert orchestration.HITLController is not None
+
+    assert agents.JobIntakeRouter is not None
+    assert agents.ScorerAgent is not None
+    assert agents.SkepticAgent is not None
+

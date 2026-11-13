@@ -1,5 +1,5 @@
 # =============================================================================
-# .gitignore — agentic-job-harvester
+# .gitignore — agentic-job-harvester-v2
 # Generated for: Python 3.11+, Google ADK, FastAPI/Uvicorn, LiteLLM, LangFuse,
 #                E2B, BigQuery, Pub/Sub, Secret Manager, Cloud Run, Docker,
 #                Ruff, mypy, pytest, coverage, python-dotenv
@@ -285,3 +285,7 @@ scripts/__output__/
 # Profiling output
 *.prof
 *.pstats
+
+installed-packages.txt
+
+

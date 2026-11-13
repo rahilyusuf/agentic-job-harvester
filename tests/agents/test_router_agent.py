@@ -72,10 +72,13 @@ async def test_router_returns_skip(sample_job: RawJob, mock_skip_decision: Route
     """Router returns SKIP when job matches exclusion rules."""
     with patch("agents.router_agent.JobIntakeRouter._call_llm", new_callable=AsyncMock) as mock_llm:
         mock_llm.return_value = mock_skip_decision
-        with patch("agents.router_agent.JobIntakeRouter._load_preference_rules", new_callable=AsyncMock) as mock_rules:
+        with patch(
+            "agents.router_agent.JobIntakeRouter._load_preference_rules", new_callable=AsyncMock
+        ) as mock_rules:
             mock_rules.return_value = [{"condition": "director title", "action": "SKIP"}]
 
             from agents.router_agent import JobIntakeRouter
+
             router = JobIntakeRouter()
             decision = await router.route(job=sample_job, user_id="user_test")
 
@@ -86,14 +89,19 @@ async def test_router_returns_skip(sample_job: RawJob, mock_skip_decision: Route
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_router_returns_process(sample_job: RawJob, mock_process_decision: RouterDecision) -> None:
+async def test_router_returns_process(
+    sample_job: RawJob, mock_process_decision: RouterDecision
+) -> None:
     """Router returns PROCESS for a standard match."""
     with patch("agents.router_agent.JobIntakeRouter._call_llm", new_callable=AsyncMock) as mock_llm:
         mock_llm.return_value = mock_process_decision
-        with patch("agents.router_agent.JobIntakeRouter._load_preference_rules", new_callable=AsyncMock) as mock_rules:
+        with patch(
+            "agents.router_agent.JobIntakeRouter._load_preference_rules", new_callable=AsyncMock
+        ) as mock_rules:
             mock_rules.return_value = []
 
             from agents.router_agent import JobIntakeRouter
+
             router = JobIntakeRouter()
             decision = await router.route(job=sample_job, user_id="user_test")
 
@@ -110,10 +118,13 @@ async def test_router_returns_high_priority(
     """Router returns HIGH_PRIORITY for exceptional matches."""
     with patch("agents.router_agent.JobIntakeRouter._call_llm", new_callable=AsyncMock) as mock_llm:
         mock_llm.return_value = mock_high_priority_decision
-        with patch("agents.router_agent.JobIntakeRouter._load_preference_rules", new_callable=AsyncMock) as mock_rules:
+        with patch(
+            "agents.router_agent.JobIntakeRouter._load_preference_rules", new_callable=AsyncMock
+        ) as mock_rules:
             mock_rules.return_value = [{"condition": "deepmind", "action": "PRIORITIZE"}]
 
             from agents.router_agent import JobIntakeRouter
+
             router = JobIntakeRouter()
             decision = await router.route(job=sample_job, user_id="user_test")
 

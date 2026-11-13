@@ -17,6 +17,7 @@ import logging
 from agents.base import BaseIntelligenceAgent
 from config.settings import get_settings
 from observability.setup import observe
+from orchestration.input_sanitizer import format_job_for_prompt
 from schemas.job_models import RawJob
 from schemas.scoring_models import ScorerOutput, SkepticOutput
 
@@ -65,15 +66,11 @@ class SkepticAgent(BaseIntelligenceAgent):
         round_number: int,
         user_id: str,
     ) -> list[dict[str, str]]:
+        job_block = format_job_for_prompt(job, max_description_chars=3000)
         return [
             self._system_message(),
             self._user_message(
-                f"## Job Posting\n"
-                f"Title: {job.title}\n"
-                f"Company: {job.company}\n"
-                f"Location: {job.location or 'Not specified'}\n"
-                f"Salary: {job.salary_raw or 'Not specified'}\n"
-                f"Description:\n{job.description[:3000]}\n\n"
+                f"## Job Posting\n{job_block}\n\n"
                 f"## Scorer's Assessment (Round {round_number})\n"
                 f"Score: {scorer_output.initial_score}/100\n"
                 f"Strengths: {', '.join(scorer_output.strengths)}\n"
@@ -115,6 +112,8 @@ class SkepticAgent(BaseIntelligenceAgent):
         output: SkepticOutput = await self._call_llm(  # type: ignore[assignment]
             messages=messages,
             trace_id=trace_id,
+            user_id=user_id,
+            session_id=job.job_id,
         )
 
         # Enforce round_2 trigger logic based on score delta

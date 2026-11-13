@@ -8,7 +8,7 @@
 
 CREATE TABLE IF NOT EXISTS `${GCP_PROJECT_ID}.${BQ_DATASET}.job_embeddings` (
     job_id       STRING    NOT NULL,
-    embedding    ARRAY<FLOAT64> NOT NULL,  -- 768-dim text-embedding-004 vector
+    embedding    ARRAY<FLOAT64>,           -- 768-dim text-embedding-004 vector
     embedded_at  TIMESTAMP NOT NULL,
 )
 CLUSTER BY job_id

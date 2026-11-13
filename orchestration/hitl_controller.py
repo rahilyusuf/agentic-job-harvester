@@ -86,11 +86,16 @@ class HITLController:
         )
 
         inline_keyboard = {
-            "inline_keyboard": [[
-                {"text": "✅ Apply", "callback_data": f"apply|{evaluation.job_id}|{trace_id}"},
-                {"text": "👎 Pass", "callback_data": f"pass|{evaluation.job_id}|{trace_id}"},
-                {"text": "🔍 Analyze", "callback_data": f"analyze|{evaluation.job_id}|{trace_id}"},
-            ]]
+            "inline_keyboard": [
+                [
+                    {"text": "✅ Apply", "callback_data": f"apply|{evaluation.job_id}|{trace_id}"},
+                    {"text": "👎 Pass", "callback_data": f"pass|{evaluation.job_id}|{trace_id}"},
+                    {
+                        "text": "🔍 Analyze",
+                        "callback_data": f"analyze|{evaluation.job_id}|{trace_id}",
+                    },
+                ]
+            ]
         }
 
         success = await self._send_telegram_message(
@@ -198,14 +203,14 @@ class HITLController:
         import json
 
         publisher = pubsub_v1.PublisherClient()
-        topic_path = publisher.topic_path(
-            self._settings.gcp_project_id, "tier2-analysis-queue"
-        )
-        message = json.dumps({
-            "job_id": job_id,
-            "user_id": user_id,
-            "trace_id": trace_id,
-        }).encode("utf-8")
+        topic_path = publisher.topic_path(self._settings.gcp_project_id, "tier2-analysis-queue")
+        message = json.dumps(
+            {
+                "job_id": job_id,
+                "user_id": user_id,
+                "trace_id": trace_id,
+            }
+        ).encode("utf-8")
 
         try:
             future = publisher.publish(topic_path, message)

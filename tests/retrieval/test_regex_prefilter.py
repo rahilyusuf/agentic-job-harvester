@@ -23,6 +23,7 @@ def make_job(job_id: str, title: str) -> RawJob:
 @pytest.fixture
 def prefilter() -> RegexPrefilter:
     from unittest.mock import MagicMock
+
     settings = MagicMock()
     settings.prefilter_max_yoe = 5
     settings.prefilter_max_results = 15
@@ -30,35 +31,44 @@ def prefilter() -> RegexPrefilter:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("title", [
-    "VP of Engineering",
-    "Vice President, AI",
-    "Director of Machine Learning",
-    "Head of Data Science",
-    "Chief AI Officer",
-    "CTO",
-    "Engineering Manager",
-    "Staff Engineer",
-    "Distinguished Engineer",
-])
+@pytest.mark.parametrize(
+    "title",
+    [
+        "VP of Engineering",
+        "Vice President, AI",
+        "Director of Machine Learning",
+        "Head of Data Science",
+        "Chief AI Officer",
+        "CTO",
+        "Engineering Manager",
+        "Staff Engineer",
+        "Distinguished Engineer",
+    ],
+)
 def test_excluded_titles_are_rejected(prefilter: RegexPrefilter, title: str) -> None:
     """All management/seniored titles must be excluded by prefilter."""
     job = make_job("test-job", title)
     passed, rejected = prefilter.run([(job, 0.9)])
     assert len(passed) == 0, f"'{title}' should have been excluded"
     assert len(rejected) == 1
-    assert "Excluded title" in rejected[0].rejection_reason or "management" in rejected[0].rejection_reason
+    assert (
+        "Excluded title" in rejected[0].rejection_reason
+        or "management" in rejected[0].rejection_reason
+    )
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("title", [
-    "Senior Machine Learning Engineer",
-    "AI Engineer",
-    "Software Engineer, ML Platform",
-    "Research Engineer",
-    "Data Scientist",
-    "ML Platform Engineer",
-])
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Senior Machine Learning Engineer",
+        "AI Engineer",
+        "Software Engineer, ML Platform",
+        "Research Engineer",
+        "Data Scientist",
+        "ML Platform Engineer",
+    ],
+)
 def test_valid_titles_pass(prefilter: RegexPrefilter, title: str) -> None:
     """Valid (non-management) titles must pass the prefilter."""
     job = make_job("test-job", title)

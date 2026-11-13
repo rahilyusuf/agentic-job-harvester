@@ -5,7 +5,7 @@ marked `[NEW]`. This file is the folder-level source of truth — if you add/rem
 rename a top-level module, update this file in the same change.
 
 ```
-agentic-job-harvester/
+agentic-job-harvester-v2/
 ├── agents/                      ← ADK agent classes (one file per agent)
 │   ├── base.py                  ← BaseIntelligenceAgent (Instructor + LiteLLM + LangFuse wrapper)
 │   ├── router_agent.py          ← JobIntakeRouter (Dynamic Routing)
@@ -69,6 +69,7 @@ agentic-job-harvester/
 │                                    AGENTS.md constraint #1 fix)
 │
 ├── observability/                ← LangFuse OpenTelemetry setup & trace scoring
+│   └── setup.py                  ← LangFuse client init + LiteLLM callback registration
 │
 ├── services/                     ← Cloud Run microservices (each = one deployable)
 │   ├── apify_receiver.py         ← Ingestion webhook consumer
