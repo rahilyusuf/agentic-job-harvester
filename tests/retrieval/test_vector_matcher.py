@@ -11,7 +11,7 @@ from utils.time import utcnow
 
 
 def make_profile(user_id: str, has_centroid: bool = True) -> UserProfile:
-    e_vec = [0.1] * 768 if has_centroid else []
+    e_vec = [0.1] * 768 if has_centroid else None
     return UserProfile(
         user_id=user_id,
         resume_gcs_uri="gs://bucket/resume.pdf",

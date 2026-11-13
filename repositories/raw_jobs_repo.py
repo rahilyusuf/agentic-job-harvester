@@ -1,4 +1,4 @@
-"""repositories/raw_jobs_repo.py — Concrete BigQuery adapter for raw_job_postings.
+﻿"""repositories/raw_jobs_repo.py — Concrete BigQuery adapter for raw_job_postings.
 
 Implements IRawJobRepository. Only import this class in:
   - services/apify_receiver.py (for injection)
@@ -33,7 +33,10 @@ class RawJobRepository:
         dataset: str | None = None,
     ) -> None:
         settings = get_settings()
-        self._client = bq_client or bigquery.Client(project=settings.gcp_project_id)
+        self._client = bq_client or bigquery.Client(
+            project=settings.gcp_project_id,
+            location=settings.bq_location,
+        )
         self._dataset = dataset or settings.bq_dataset
         self._project = settings.gcp_project_id
         self._table = f"{self._project}.{self._dataset}.raw_job_postings"
@@ -57,34 +60,39 @@ class RawJobRepository:
         logger.info("Inserted job_id=%s", job.job_id)
 
     @async_retry(max_attempts=3, base_delay=1.0)
-    async def batch_insert_jobs(self, jobs: list[RawJob]) -> int:
-        """Batch insert jobs. Returns count of novel (non-duplicate) inserts."""
+    async def batch_insert_jobs(self, jobs: list[RawJob]) -> list[str]:
+        """Batch insert jobs. Returns list of newly inserted job_ids (empty if all duplicates)."""
         if not jobs:
-            return 0
+            return []
 
-        # Check all job_ids in one BQ query
+        # Check all job_ids in one BQ query using array parameter
         ids = [j.job_id for j in jobs]
-        placeholder = ", ".join(f"'{jid}'" for jid in ids)
         window_start = format_bq_timestamp(get_dedup_window_start())
         query = f"""
             SELECT job_id FROM `{self._table}`
-            WHERE job_id IN ({placeholder})
+            WHERE job_id IN UNNEST(@ids)
               AND scraped_at >= '{window_start}'
         """
-        existing = {row.job_id for row in self._client.query_and_wait(query)}
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ArrayQueryParameter("ids", "STRING", ids),
+            ]
+        )
+        existing = {row.job_id for row in self._client.query_and_wait(query, job_config=job_config)}
 
         novel_jobs = [j for j in jobs if j.job_id not in existing]
         if not novel_jobs:
             logger.info("All %d jobs are duplicates; nothing inserted.", len(jobs))
-            return 0
+            return []
 
         rows = [j.model_dump(mode="json") for j in novel_jobs]
         errors = self._client.insert_rows_json(self._table, rows)
         if errors:
             raise RuntimeError(f"BQ batch insert errors: {errors}")
 
+        novel_ids = [j.job_id for j in novel_jobs]
         logger.info("Batch inserted %d/%d novel jobs.", len(novel_jobs), len(jobs))
-        return len(novel_jobs)
+        return novel_ids
 
     async def exists(self, job_id: str) -> bool:
         """Check if job_id exists within the 90-day dedup window."""
@@ -129,3 +137,52 @@ class RawJobRepository:
             LIMIT {limit}
         """
         return [self._row_to_raw_job(row) for row in self._client.query_and_wait(query)]
+
+    async def get_unembedded_job_ids(
+        self,
+        job_ids: list[str] | None = None,
+        limit: int = 100,
+        min_age_seconds: int = 0,
+    ) -> list[str]:
+        """Fetch job IDs that are saved in raw_job_postings but remain unembedded (status=NEW_RAW).
+
+        Args:
+            job_ids: Optional list of candidate job IDs to filter against (e.g. from a retried batch).
+            limit: Maximum number of job IDs to return.
+            min_age_seconds: Minimum age in seconds since scraped_at (to avoid racing with fresh writes).
+
+        Returns:
+            List of job_id strings with status = 'NEW_RAW'.
+        """
+        window_start = format_bq_timestamp(get_dedup_window_start())
+        if job_ids is not None:
+            if not job_ids:
+                return []
+            query = f"""
+                SELECT job_id FROM `{self._table}`
+                WHERE job_id IN UNNEST(@ids)
+                  AND status = '{JobStatus.NEW_RAW.value}'
+                  AND scraped_at >= '{window_start}'
+                LIMIT {limit}
+            """
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ArrayQueryParameter("ids", "STRING", job_ids),
+                ]
+            )
+            rows = self._client.query_and_wait(query, job_config=job_config)
+        else:
+            age_filter = ""
+            if min_age_seconds > 0:
+                age_filter = f"AND scraped_at <= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {min_age_seconds} SECOND)"
+            query = f"""
+                SELECT job_id FROM `{self._table}`
+                WHERE status = '{JobStatus.NEW_RAW.value}'
+                  AND scraped_at >= '{window_start}'
+                  {age_filter}
+                ORDER BY scraped_at ASC
+                LIMIT {limit}
+            """
+            rows = self._client.query_and_wait(query)
+
+        return [row.job_id for row in rows]
