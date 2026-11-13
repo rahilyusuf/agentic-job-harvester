@@ -1,4 +1,4 @@
-# Stack & Version Pins — agentic-job-harvester
+# Stack & Version Pins — agentic-job-harvester-v2
 
 ## Runtime Versions
 - **Python**: 3.12 or 3.13, pinned. Not 3.14 (wheel availability lag for compiled deps).

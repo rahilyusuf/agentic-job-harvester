@@ -66,9 +66,10 @@ async def test_pipeline_skip_halts_immediately(
         skip_reason="VP title excluded",
     )
 
-    with patch("orchestration.pipeline.JobIntakeRouter.route", new_callable=AsyncMock) as mock_route, \
-         patch("orchestration.pipeline.ScorerAgent.score", new_callable=AsyncMock) as mock_score:
-
+    with (
+        patch("orchestration.pipeline.JobIntakeRouter.route", new_callable=AsyncMock) as mock_route,
+        patch("orchestration.pipeline.ScorerAgent.score", new_callable=AsyncMock) as mock_score,
+    ):
         mock_route.return_value = skip_decision
 
         pipeline = build_tier1_pipeline(
@@ -125,10 +126,11 @@ async def test_pipeline_produces_evaluated_job_on_process(
         request_round_2=False,
     )
 
-    with patch("orchestration.pipeline.JobIntakeRouter.route", new_callable=AsyncMock) as mock_route, \
-         patch("orchestration.pipeline.ScorerAgent.score", new_callable=AsyncMock) as mock_score, \
-         patch("orchestration.pipeline.SkepticAgent.audit", new_callable=AsyncMock) as mock_audit:
-
+    with (
+        patch("orchestration.pipeline.JobIntakeRouter.route", new_callable=AsyncMock) as mock_route,
+        patch("orchestration.pipeline.ScorerAgent.score", new_callable=AsyncMock) as mock_score,
+        patch("orchestration.pipeline.SkepticAgent.audit", new_callable=AsyncMock) as mock_audit,
+    ):
         mock_route.return_value = process_decision
         mock_score.return_value = scorer_out
         mock_audit.return_value = skeptic_out

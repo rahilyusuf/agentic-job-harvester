@@ -239,17 +239,13 @@ def sanitize_job_fields(
         Values are sanitized strings (or None if field was absent).
     """
     sanitized_location = (
-        sanitize_scraped_text(
-            location, max_chars=200, source_label="job_location", wrap=wrap
-        )
+        sanitize_scraped_text(location, max_chars=200, source_label="job_location", wrap=wrap)
         if location is not None and location.strip()
         else None
     )
 
     sanitized_salary = (
-        sanitize_scraped_text(
-            salary_raw, max_chars=100, source_label="job_salary", wrap=wrap
-        )
+        sanitize_scraped_text(salary_raw, max_chars=100, source_label="job_salary", wrap=wrap)
         if salary_raw is not None and salary_raw.strip()
         else None
     )
@@ -266,9 +262,7 @@ def sanitize_job_fields(
     )
 
     return {
-        "title": sanitize_scraped_text(
-            title, max_chars=200, source_label="job_title", wrap=wrap
-        ),
+        "title": sanitize_scraped_text(title, max_chars=200, source_label="job_title", wrap=wrap),
         "company": sanitize_scraped_text(
             company, max_chars=200, source_label="job_company", wrap=wrap
         ),

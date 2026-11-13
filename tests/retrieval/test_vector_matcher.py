@@ -31,11 +31,13 @@ def make_profile(user_id: str, has_centroid: bool = True) -> UserProfile:
 @pytest.fixture
 def mock_embedding_repo() -> MagicMock:
     repo = MagicMock()
-    repo.vector_search = AsyncMock(return_value=[
-        ("job-001", 0.95),
-        ("job-002", 0.88),
-        ("job-003", 0.75),
-    ])
+    repo.vector_search = AsyncMock(
+        return_value=[
+            ("job-001", 0.95),
+            ("job-002", 0.88),
+            ("job-003", 0.75),
+        ]
+    )
     return repo
 
 

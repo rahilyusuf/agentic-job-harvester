@@ -20,6 +20,7 @@ from schemas.scoring_models import ScorerOutput, SkepticOutput
 
 # ── Raw Jobs ───────────────────────────────────────────────────────────────────
 
+
 @runtime_checkable
 class IRawJobRepository(Protocol):
     """Protocol for raw_job_postings table access."""
@@ -60,6 +61,7 @@ class IRawJobRepository(Protocol):
 
 # ── Embeddings ─────────────────────────────────────────────────────────────────
 
+
 @runtime_checkable
 class IEmbeddingRepository(Protocol):
     """Protocol for job_embeddings table access."""
@@ -93,6 +95,7 @@ class IEmbeddingRepository(Protocol):
 
 # ── Evaluated Jobs ─────────────────────────────────────────────────────────────
 
+
 @runtime_checkable
 class IEvaluatedRepository(Protocol):
     """Protocol for job_evaluated table access."""
@@ -114,9 +117,7 @@ class IEvaluatedRepository(Protocol):
         """Return top-scoring jobs for a user above the notification threshold."""
         ...
 
-    async def update_tier2_status(
-        self, job_id: str, user_id: str, tier2_status: str
-    ) -> None:
+    async def update_tier2_status(self, job_id: str, user_id: str, tier2_status: str) -> None:
         """Update the tier2_status field for optimistic locking."""
         ...
 
@@ -126,6 +127,7 @@ class IEvaluatedRepository(Protocol):
 
 
 # ── User Actions (HITL Telemetry) ─────────────────────────────────────────────
+
 
 @runtime_checkable
 class IActionsRepository(Protocol):
@@ -159,6 +161,7 @@ class IActionsRepository(Protocol):
 
 
 # ── User Profiles ──────────────────────────────────────────────────────────────
+
 
 @runtime_checkable
 class IProfileRepository(Protocol):

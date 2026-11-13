@@ -156,8 +156,6 @@ async def generate_embedding(text: str) -> list[float]:
     values: list[float] = response.data[0]["embedding"]
 
     if len(values) != _EMBEDDING_DIMENSIONS:
-        raise ValueError(
-            f"Expected {_EMBEDDING_DIMENSIONS}-dim embedding, got {len(values)}"
-        )
+        raise ValueError(f"Expected {_EMBEDDING_DIMENSIONS}-dim embedding, got {len(values)}")
     logger.debug("Embedding generated: dims=%d text_len=%d", len(values), len(text))
     return values

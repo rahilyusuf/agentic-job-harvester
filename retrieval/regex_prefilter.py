@@ -31,10 +31,10 @@ EXCLUDED_TITLE_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\bdirector\b", re.IGNORECASE),
     re.compile(r"\bhead\s+of\b", re.IGNORECASE),
     re.compile(r"\bchief\b", re.IGNORECASE),
-    re.compile(r"\bc[etos]o\b", re.IGNORECASE),           # CTO, CEO, COO, CSO
+    re.compile(r"\bc[etos]o\b", re.IGNORECASE),  # CTO, CEO, COO, CSO
     re.compile(r"\bmanager\b", re.IGNORECASE),
-    re.compile(r"\bprincipal\b", re.IGNORECASE),          # Principal Engineer is fine but filtered
-    re.compile(r"\bstaff\s+engineer\b", re.IGNORECASE),   # too senior
+    re.compile(r"\bprincipal\b", re.IGNORECASE),  # Principal Engineer is fine but filtered
+    re.compile(r"\bstaff\s+engineer\b", re.IGNORECASE),  # too senior
     re.compile(r"\bdistinguished\b", re.IGNORECASE),
     re.compile(r"\bfellow\b", re.IGNORECASE),
     re.compile(r"\bsenior\s+director\b", re.IGNORECASE),
@@ -104,12 +104,14 @@ class RegexPrefilter:
 
             # ── Rule 1: Title exclusion (management / over-seniored) ──────────
             if self._is_excluded_title(job.title):
-                rejected.append(PrefilterRejection(
-                    job_id=job.job_id,
-                    title=job.title,
-                    similarity_score=score,
-                    rejection_reason=f"Excluded title pattern matched: '{job.title}'",
-                ))
+                rejected.append(
+                    PrefilterRejection(
+                        job_id=job.job_id,
+                        title=job.title,
+                        similarity_score=score,
+                        rejection_reason=f"Excluded title pattern matched: '{job.title}'",
+                    )
+                )
                 continue
 
             # ── Rule 2: YOE ceiling ───────────────────────────────────────────
@@ -118,29 +120,35 @@ class RegexPrefilter:
                 yoe_max = extraction.yoe_required_max
                 # Skip if management role flag set by extraction
                 if extraction.is_management_role:
-                    rejected.append(PrefilterRejection(
-                        job_id=job.job_id,
-                        title=job.title,
-                        similarity_score=score,
-                        rejection_reason="LLM extraction flagged as management role",
-                    ))
+                    rejected.append(
+                        PrefilterRejection(
+                            job_id=job.job_id,
+                            title=job.title,
+                            similarity_score=score,
+                            rejection_reason="LLM extraction flagged as management role",
+                        )
+                    )
                     continue
 
             if yoe_max is not None and yoe_max > self._max_yoe:
-                rejected.append(PrefilterRejection(
+                rejected.append(
+                    PrefilterRejection(
+                        job_id=job.job_id,
+                        title=job.title,
+                        similarity_score=score,
+                        rejection_reason=f"YOE required ({yoe_max}) exceeds ceiling ({self._max_yoe})",
+                    )
+                )
+                continue
+
+            passed.append(
+                PrefilterResult(
                     job_id=job.job_id,
                     title=job.title,
                     similarity_score=score,
-                    rejection_reason=f"YOE required ({yoe_max}) exceeds ceiling ({self._max_yoe})",
-                ))
-                continue
-
-            passed.append(PrefilterResult(
-                job_id=job.job_id,
-                title=job.title,
-                similarity_score=score,
-                yoe_required_max=yoe_max,
-            ))
+                    yoe_required_max=yoe_max,
+                )
+            )
 
             if len(passed) >= self._max_results:
                 # Remaining candidates skipped (budget cap)

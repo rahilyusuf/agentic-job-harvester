@@ -66,7 +66,7 @@ class JobIntakeRouter(BaseIntelligenceAgent):
         job: RawJob,
         preference_rules: list[dict],
         user_context: str,
-     ) -> list[dict[str, str]]:
+    ) -> list[dict[str, str]]:
         rules_text = json.dumps(preference_rules, indent=2) if preference_rules else "No rules yet."
         job_block = format_job_for_prompt(job, max_description_chars=1500)
         return [
@@ -111,10 +111,7 @@ class JobIntakeRouter(BaseIntelligenceAgent):
     async def _load_preference_rules(self, user_id: str) -> list[dict]:
         """Load dynamic_preference_rules from Firestore for the given user."""
         try:
-            doc_ref = (
-                self._fs.collection(_PREFERENCE_RULES_COLLECTION)
-                .document(user_id)
-            )
+            doc_ref = self._fs.collection(_PREFERENCE_RULES_COLLECTION).document(user_id)
             doc = await doc_ref.get()
             if doc.exists:
                 data = doc.to_dict() or {}

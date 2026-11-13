@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 # ── Tier 1 ─────────────────────────────────────────────────────────────────────
 
+
 @dataclass
 class Tier1PipelineResult:
     """Output from a single Tier 1 pipeline run for one job + user."""
@@ -212,6 +213,7 @@ class Tier1Pipeline:
 
 # ── Tier 2 ─────────────────────────────────────────────────────────────────────
 
+
 @dataclass
 class Tier2PipelineResult:
     """Output from the Tier 2 DueDiligenceSuite for one job + user."""
@@ -264,9 +266,7 @@ class Tier2Pipeline:
         """
         try:
             # Optimistic lock
-            await self._evaluated_repo.update_tier2_status(
-                job.job_id, user_id, "IN_PROGRESS"
-            )
+            await self._evaluated_repo.update_tier2_status(job.job_id, user_id, "IN_PROGRESS")
 
             # Agent 3: Company Research (sequential, inputs to parallel agents)
             research = await self._research_agent.research(job=job, user_id=user_id)
@@ -320,6 +320,7 @@ class Tier2Pipeline:
 
 
 # ── Factory functions ──────────────────────────────────────────────────────────
+
 
 def build_tier1_pipeline(
     raw_jobs_repo: IRawJobRepository,

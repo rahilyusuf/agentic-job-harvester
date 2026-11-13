@@ -35,6 +35,7 @@ async def lifespan(app: FastAPI):  # type: ignore[type-arg]
     root_logger.setLevel(logging.INFO)
     if not root_logger.handlers:
         import sys
+
         _handler = logging.StreamHandler(sys.stdout)
         _handler.setFormatter(logging.Formatter(fmt=_LOG_FORMAT, datefmt=_LOG_DATEFMT))
         root_logger.addHandler(_handler)
@@ -117,4 +118,5 @@ async def _process_job(job_id: str) -> None:
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run("services.embedding_worker:app", host="0.0.0.0", port=8080, workers=1)

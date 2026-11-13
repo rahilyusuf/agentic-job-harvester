@@ -57,12 +57,13 @@ logger = logging.getLogger(__name__)
 
 _APIFY_DATASET_API = "https://api.apify.com/v2/datasets/{dataset_id}/items"
 _APIFY_ACTOR_RUN_API = "https://api.apify.com/v2/actor-runs/{actor_run_id}"
-_DATASET_FETCH_TIMEOUT_S = 60.0   # seconds; dataset fetch can be large
-_RUN_VERIFY_TIMEOUT_S = 15.0      # seconds; metadata check
+_DATASET_FETCH_TIMEOUT_S = 60.0  # seconds; dataset fetch can be large
+_RUN_VERIFY_TIMEOUT_S = 15.0  # seconds; metadata check
 _PUBSUB_PUBLISH_TIMEOUT_S = 10.0  # seconds per message
 
 
 # ── Lifespan ───────────────────────────────────────────────────────────────────
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # type: ignore[type-arg]
@@ -111,12 +112,15 @@ app.add_middleware(
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     """Health check endpoint for Cloud Run liveness probe."""
     return {"status": "ok"}
 
-#starting point 
+
+# starting point
+
 
 @app.post("/webhook/apify", status_code=status.HTTP_202_ACCEPTED)
 async def apify_webhook(request: Request) -> dict[str, Any]:
@@ -139,7 +143,7 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
             "actorId": "...",
             "actorRunId": "...",
             "actorTaskId": "..."    // optional
-        },      
+        },
         "resource": {
             "id": "<actorRunId>",
             "actId": "<actorId>",
@@ -244,8 +248,12 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
             "message": f"Actor run status '{run_status}' is not SUCCEEDED; skipped.",
         }
 
-    actor_run_id: str = (resource.get("id") or payload.get("eventData", {}).get("actorRunId") or "").strip()
-    actor_id: str = (resource.get("actId") or payload.get("eventData", {}).get("actorId") or "").strip()
+    actor_run_id: str = (
+        resource.get("id") or payload.get("eventData", {}).get("actorRunId") or ""
+    ).strip()
+    actor_id: str = (
+        resource.get("actId") or payload.get("eventData", {}).get("actorId") or ""
+    ).strip()
     dataset_id: str = resource.get("defaultDatasetId", "").strip()
 
     if not actor_run_id or not actor_id or not dataset_id:
@@ -333,7 +341,9 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
     raw_items = await _fetch_dataset_items(dataset_id, settings.apify_api_token)
 
     if not raw_items:
-        logger.info("── DATASET FETCHED  item_count=0  dataset_id=%s — nothing to process", dataset_id)
+        logger.info(
+            "── DATASET FETCHED  item_count=0  dataset_id=%s — nothing to process", dataset_id
+        )
         return {"dataset_id": dataset_id, "received": 0, "inserted": 0, "published": 0}
 
     logger.info("── DATASET FETCHED  item_count=%d  dataset_id=%s", len(raw_items), dataset_id)
@@ -539,6 +549,7 @@ async def reconcile_unpublished_jobs(
 
 # ── Private helpers ────────────────────────────────────────────────────────────
 
+
 async def _verify_actor_run(
     actor_run_id: str,
     api_token: str,
@@ -578,7 +589,9 @@ async def _verify_actor_run(
             detail="Apify Actor Run API request timed out",
         ) from exc
     except httpx.RequestError as exc:
-        logger.error("Apify Actor Run API request error: actor_run_id=%s error=%s", actor_run_id, exc)
+        logger.error(
+            "Apify Actor Run API request error: actor_run_id=%s error=%s", actor_run_id, exc
+        )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Could not reach Apify Actor Run API",
@@ -795,4 +808,5 @@ async def _publish_job_ids(
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run("services.apify_receiver:app", host="0.0.0.0", port=8080, workers=1)

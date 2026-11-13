@@ -5,7 +5,7 @@ marked `[NEW]`. This file is the folder-level source of truth — if you add/rem
 rename a top-level module, update this file in the same change.
 
 ```
-agentic-job-harvester/
+agentic-job-harvester-v2/
 ├── agents/                      ← ADK agent classes (one file per agent)
 │   ├── base.py                  ← BaseIntelligenceAgent (Instructor + LiteLLM + LangFuse wrapper)
 │   ├── router_agent.py          ← JobIntakeRouter (Dynamic Routing)

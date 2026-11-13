@@ -99,9 +99,7 @@ def normalize(item: dict[str, Any]) -> RawJob | None:
     job_id = compute_job_id(job_url, ats_id=ats_id)
 
     # Prefer plain-text description for embedding; fall back to HTML as last resort.
-    description: str = (
-        item.get("descriptionText", "") or item.get("descriptionHtml", "")
-    ).strip()
+    description: str = (item.get("descriptionText", "") or item.get("descriptionHtml", "")).strip()
 
     if len(description) < _MIN_DESCRIPTION_LEN:
         logger.warning(

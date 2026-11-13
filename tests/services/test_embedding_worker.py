@@ -39,7 +39,8 @@ def _make_dummy_job(job_id: str, status: JobStatus = JobStatus.NEW_RAW) -> RawJo
         title="AI Engineer",
         company="TechCorp",
         location="Dubai",
-        description="Build LLM applications with python, langchain and embeddings for enterprise." * 2,
+        description="Build LLM applications with python, langchain and embeddings for enterprise."
+        * 2,
         status=status,
     )
 
@@ -83,7 +84,10 @@ async def test_worker_crash_and_retry():
     with (
         patch("services.embedding_worker.RawJobRepository") as mock_raw_cls,
         patch("services.embedding_worker.EmbeddingRepository") as mock_emb_cls,
-        patch("services.embedding_worker.generate_embedding", side_effect=RuntimeError("LiteLLM proxy timeout")),
+        patch(
+            "services.embedding_worker.generate_embedding",
+            side_effect=RuntimeError("LiteLLM proxy timeout"),
+        ),
     ):
         mock_raw = mock_raw_cls.return_value
         mock_raw.get_job = AsyncMock(return_value=raw_job)
@@ -97,8 +101,10 @@ async def test_worker_crash_and_retry():
     # 1. Marked as EMBEDDING_QUEUED
     # 2. Reset back to NEW_RAW upon failure
     assert mock_raw.update_status.await_count == 2
-    mock_raw.update_status.assert_has_awaits([
-        ((job_id, JobStatus.EMBEDDING_QUEUED.value),),
-        ((job_id, JobStatus.NEW_RAW.value),),
-    ])
+    mock_raw.update_status.assert_has_awaits(
+        [
+            ((job_id, JobStatus.EMBEDDING_QUEUED.value),),
+            ((job_id, JobStatus.NEW_RAW.value),),
+        ]
+    )
     mock_emb.upsert_embedding.assert_not_called()

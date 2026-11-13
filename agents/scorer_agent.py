@@ -57,10 +57,13 @@ class ScorerAgent(BaseIntelligenceAgent):
         skeptic_feedback: str | None,
         user_id: str,
     ) -> list[dict[str, str]]:
-        rules_text = "\n".join(
-            f"- {r.get('condition', '')} → {r.get('action', '')} ({r.get('score_delta', 0):+d})"
-            for r in preference_rules
-        ) or "No active preference rules."
+        rules_text = (
+            "\n".join(
+                f"- {r.get('condition', '')} → {r.get('action', '')} ({r.get('score_delta', 0):+d})"
+                for r in preference_rules
+            )
+            or "No active preference rules."
+        )
 
         round_context = ""
         if round_number == 2 and skeptic_feedback:

@@ -80,9 +80,7 @@ async def seed_rules(user_id: str) -> None:
     existing = await doc_ref.get()
 
     if existing.exists:
-        logger.warning(
-            "Rules already exist for user_id=%s. Use --force to overwrite.", user_id
-        )
+        logger.warning("Rules already exist for user_id=%s. Use --force to overwrite.", user_id)
         return
 
     data = {

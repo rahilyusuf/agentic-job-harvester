@@ -1,4 +1,4 @@
-# Security & Guardrails — agentic-job-harvester
+# Security & Guardrails — agentic-job-harvester-v2
 
 ## Hard Rules (never violate)
 

@@ -9,7 +9,7 @@
 # Workload Identity / Cloud Run service account in production.
 #
 # To list available Vertex AI regions for your project (Cloud Shell):
-#   gcloud ai locations list --project=agentic-job-harvester
+#   gcloud ai locations list --project=agentic-job-harvester-v2
 #
 # All Gemini 2.5 models route through the Vertex AI "global" endpoint,
 # which lets Google auto-route to the nearest available region.
@@ -29,7 +29,7 @@ model_list:
   - model_name: fast-flash
     litellm_params:
       model: vertex_ai/gemini-2.5-flash
-      vertex_project: agentic-job-harvester
+      vertex_project: agentic-job-harvester-v2
       vertex_location: global
       temperature: 0.1
       max_tokens: 4096
@@ -43,11 +43,11 @@ model_list:
   - model_name: deep-pro
     litellm_params:
       model: vertex_ai/gemini-2.5-pro
-      vertex_project: agentic-job-harvester
+      vertex_project: agentic-job-harvester-v2
       vertex_location: global
       temperature: 0.2
       max_tokens: 8192
-      rpm: 10    # hard cap per AGENTS.md: "gemini-pro → rate-limited to 10 RPM"
+      rpm: 10 # hard cap per AGENTS.md: "gemini-pro → rate-limited to 10 RPM"
     model_info:
       max_input_tokens: 1048576
       max_output_tokens: 8192
@@ -58,7 +58,7 @@ model_list:
   - model_name: router-flash
     litellm_params:
       model: vertex_ai/gemini-2.5-flash
-      vertex_project: agentic-job-harvester
+      vertex_project: agentic-job-harvester-v2
       vertex_location: global
       temperature: 0.0
       max_tokens: 512
@@ -72,7 +72,7 @@ model_list:
   - model_name: text-embedding-004
     litellm_params:
       model: vertex_ai/text-embedding-004
-      vertex_project: agentic-job-harvester
+      vertex_project: agentic-job-harvester-v2
       vertex_location: us-central1
     model_info:
       max_input_tokens: 2048
@@ -94,9 +94,9 @@ router_settings:
 
   # Retry configuration
   num_retries: 2
-  retry_after: 5      # seconds between retries
+  retry_after: 5 # seconds between retries
   allowed_fails: 1
-  cooldown_time: 30   # seconds to wait before re-routing to a failed model
+  cooldown_time: 30 # seconds to wait before re-routing to a failed model
 
 litellm_settings:
   # LangFuse callback — auto-logs all prompts/tokens/latency
@@ -112,9 +112,9 @@ litellm_settings:
 
   # Cost tracking
   track_cost_callback: true
-  max_budget: 50.0    # USD monthly guard rail
+  max_budget: 50.0 # USD monthly guard rail
   budget_duration: "1mo"
 
   # Request/response timeouts
-  request_timeout: 60    # seconds
+  request_timeout: 60 # seconds
   stream_timeout: 120

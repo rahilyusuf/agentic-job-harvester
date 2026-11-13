@@ -80,12 +80,11 @@ def test_profile_repo_satisfies_protocol(mock_bq: MagicMock) -> None:
 def test_invalid_actions_repo_action_raises() -> None:
     """ActionsRepository.record_action must reject invalid action strings."""
     import asyncio
+
     repo = ActionsRepository(bq_client=make_mock_bq_client(), dataset="test_dataset")
 
     with pytest.raises(ValueError, match="Invalid action"):
-        asyncio.run(repo.record_action(
-            job_id="test", user_id="user", action="unknown_action"
-        ))
+        asyncio.run(repo.record_action(job_id="test", user_id="user", action="unknown_action"))
 
 
 @pytest.mark.unit
@@ -155,4 +154,3 @@ async def test_raw_jobs_get_unembedded_job_ids_for_reconciliation(mock_bq: Magic
     assert "status = 'NEW_RAW'" in query_str
     assert "TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 120 SECOND)" in query_str
     assert "LIMIT 25" in query_str
-

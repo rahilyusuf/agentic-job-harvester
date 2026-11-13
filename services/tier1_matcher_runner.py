@@ -70,11 +70,25 @@ async def run_tier1_for_user(
         if job:
             job_objects.append(job)
 
-    candidates_with_scores = list(zip(job_objects, [vr.similarity_score for vr in vector_results if any(j.job_id == vr.job_id for j in job_objects)]))
+    candidates_with_scores = list(
+        zip(
+            job_objects,
+            [
+                vr.similarity_score
+                for vr in vector_results
+                if any(j.job_id == vr.job_id for j in job_objects)
+            ],
+        )
+    )
 
     # Step B: Regex prefilter
     passed, rejected = prefilter.run(candidates_with_scores)
-    logger.info("User %s: %d vector results → %d passed prefilter", user_id, len(vector_results), len(passed))
+    logger.info(
+        "User %s: %d vector results → %d passed prefilter",
+        user_id,
+        len(vector_results),
+        len(passed),
+    )
 
     # Step C-E: Run Tier 1 pipeline for each passed candidate
     stats = {"skipped": 0, "scored": 0, "errors": 0}

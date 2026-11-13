@@ -31,6 +31,7 @@ async def lifespan(app: FastAPI):  # type: ignore[type-arg]
     root_logger.setLevel(logging.INFO)
     if not root_logger.handlers:
         import sys
+
         _handler = logging.StreamHandler(sys.stdout)
         _handler.setFormatter(logging.Formatter(fmt=_LOG_FORMAT, datefmt=_LOG_DATEFMT))
         root_logger.addHandler(_handler)
@@ -80,7 +81,9 @@ async def telegram_update(request: Request) -> JSONResponse:
     try:
         update: dict[str, Any] = await request.json()
     except Exception:  # noqa: BLE001
-        return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content={"error": "Invalid JSON"})
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST, content={"error": "Invalid JSON"}
+        )
 
     callback_query = update.get("callback_query")
     if not callback_query:
@@ -116,21 +119,23 @@ async def telegram_update(request: Request) -> JSONResponse:
     return JSONResponse(content={"ok": True})
 
 
-async def _answer_callback_query(
-    callback_query_id: str, text: str, token: str
-) -> None:
+async def _answer_callback_query(callback_query_id: str, text: str, token: str) -> None:
     """Send answerCallbackQuery to dismiss the loading spinner in Telegram."""
     import httpx
+
     if not token:
         return
     url = f"https://api.telegram.org/bot{token}/answerCallbackQuery"
     async with httpx.AsyncClient(timeout=5.0) as client:
         try:
-            await client.post(url, json={"callback_query_id": callback_query_id, "text": text[:200]})
+            await client.post(
+                url, json={"callback_query_id": callback_query_id, "text": text[:200]}
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("answerCallbackQuery failed: %s", exc)
 
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run("services.telegram_webhook:app", host="0.0.0.0", port=8080, workers=1)

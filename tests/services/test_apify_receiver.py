@@ -38,7 +38,6 @@ def _make_test_settings(**overrides: Any) -> Settings:
     return Settings.model_construct(**data)
 
 
-
 def _build_mock_request(
     payload: dict[str, Any] | bytes | str,
     headers: list[tuple[bytes, bytes]] | None = None,
@@ -73,7 +72,8 @@ def mock_dataset_items() -> list[dict[str, Any]]:
         {
             "title": "Data Engineer 1",
             "companyName": "Company A",
-            "descriptionText": "Valid job description content that meets the minimum length requirement easily." * 2,
+            "descriptionText": "Valid job description content that meets the minimum length requirement easily."
+            * 2,
             "jobUrl": "https://example.com/job1",
             "applyUrl": "https://example.com/apply1",
         },
@@ -81,7 +81,8 @@ def mock_dataset_items() -> list[dict[str, Any]]:
         {
             "title": "Data Engineer 2",
             "companyName": "Company B",
-            "descriptionText": "Valid job description content that meets the minimum length requirement easily." * 2,
+            "descriptionText": "Valid job description content that meets the minimum length requirement easily."
+            * 2,
             "jobUrl": "https://example.com/job2",
             "applyUrl": "",
         },
@@ -89,7 +90,8 @@ def mock_dataset_items() -> list[dict[str, Any]]:
         {
             "title": "Workday Engineer 1",
             "companyName": "Workday Inc",
-            "descriptionText": "Valid job description content that meets the minimum length requirement easily." * 2,
+            "descriptionText": "Valid job description content that meets the minimum length requirement easily."
+            * 2,
             "jobUrl": "",
             "applyUrl": "https://workday.example.com/job3",
         },
@@ -97,7 +99,8 @@ def mock_dataset_items() -> list[dict[str, Any]]:
         {
             "title": "Workday Engineer 2",
             "companyName": "Workday Inc",
-            "descriptionText": "Valid job description content that meets the minimum length requirement easily." * 2,
+            "descriptionText": "Valid job description content that meets the minimum length requirement easily."
+            * 2,
             "jobUrl": "   ",
             "applyUrl": "https://workday.example.com/job4",
         },
@@ -105,7 +108,8 @@ def mock_dataset_items() -> list[dict[str, Any]]:
         {
             "title": "Workday Engineer 3",
             "companyName": "Workday Inc",
-            "descriptionText": "Valid job description content that meets the minimum length requirement easily." * 2,
+            "descriptionText": "Valid job description content that meets the minimum length requirement easily."
+            * 2,
             "jobUrl": None,
             "applyUrl": "https://workday.example.com/job5",
         },
@@ -113,7 +117,8 @@ def mock_dataset_items() -> list[dict[str, Any]]:
         {
             "title": "Invalid Job",
             "companyName": "Nowhere",
-            "descriptionText": "Valid job description content that meets the minimum length requirement easily." * 2,
+            "descriptionText": "Valid job description content that meets the minimum length requirement easily."
+            * 2,
             "jobUrl": "",
             "applyUrl": "",
         },
@@ -141,8 +146,21 @@ async def test_receiver_tracks_apply_url_fallback_and_logs(
 
     with (
         patch("services.apify_receiver.get_settings", return_value=mock_settings),
-        patch("services.apify_receiver._verify_actor_run", new=AsyncMock(return_value={"id": "run-test-123", "actId": "scraper-actor", "status": "SUCCEEDED", "defaultDatasetId": "dataset-xyz"})),
-        patch("services.apify_receiver._fetch_dataset_items", new=AsyncMock(return_value=mock_dataset_items)),
+        patch(
+            "services.apify_receiver._verify_actor_run",
+            new=AsyncMock(
+                return_value={
+                    "id": "run-test-123",
+                    "actId": "scraper-actor",
+                    "status": "SUCCEEDED",
+                    "defaultDatasetId": "dataset-xyz",
+                }
+            ),
+        ),
+        patch(
+            "services.apify_receiver._fetch_dataset_items",
+            new=AsyncMock(return_value=mock_dataset_items),
+        ),
         patch("services.apify_receiver.RawJobRepository") as mock_repo_cls,
         patch("services.apify_receiver._publish_job_ids", new=AsyncMock(return_value=(5, 0))),
         caplog.at_level(logging.INFO, logger="services.apify_receiver"),
@@ -167,27 +185,41 @@ async def test_receiver_tracks_apply_url_fallback_and_logs(
     assert "── FETCHING DATASET  dataset_id=dataset-xyz" in log_text
     assert "── DATASET FETCHED  item_count=6  dataset_id=dataset-xyz" in log_text
     assert "── NORMALIZATION START  items=6" in log_text
-    assert "── NORMALIZATION COMPLETE  received=6  valid=5  skipped=1  apply_url_fallback=3" in log_text
+    assert (
+        "── NORMALIZATION COMPLETE  received=6  valid=5  skipped=1  apply_url_fallback=3"
+        in log_text
+    )
     assert "── BIGQUERY PERSIST START  jobs_to_insert=5" in log_text
     assert "── BIGQUERY PERSIST COMPLETE  novel_inserted=5  duplicates_skipped=0" in log_text
     assert "── PUBSUB PUBLISH START  job_ids_to_publish=5" in log_text
     assert "── PUBSUB PUBLISH COMPLETE  published=5  failures=0" in log_text
-    assert "── APIFY WEBHOOK COMPLETE  dataset_id=dataset-xyz  received=6  normalized=5  apply_url_fallback=3" in log_text
+    assert (
+        "── APIFY WEBHOOK COMPLETE  dataset_id=dataset-xyz  received=6  normalized=5  apply_url_fallback=3"
+        in log_text
+    )
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_successful_insertion_and_successful_publication():
     """BigQuery insertion succeeds and all Pub/Sub messages are published."""
-    single_item = [{
-        "title": "Machine Learning Engineer",
-        "companyName": "AI Corp",
-        "descriptionText": "Develop state of the art deep learning and generative models for production." * 2,
-        "jobUrl": "https://example.com/job/ml-1",
-    }]
+    single_item = [
+        {
+            "title": "Machine Learning Engineer",
+            "companyName": "AI Corp",
+            "descriptionText": "Develop state of the art deep learning and generative models for production."
+            * 2,
+            "jobUrl": "https://example.com/job/ml-1",
+        }
+    ]
     payload = {
         "eventType": "ACTOR.RUN.SUCCEEDED",
-        "resource": {"id": "run-1", "actId": "act-1", "status": "SUCCEEDED", "defaultDatasetId": "ds-1"},
+        "resource": {
+            "id": "run-1",
+            "actId": "act-1",
+            "status": "SUCCEEDED",
+            "defaultDatasetId": "ds-1",
+        },
     }
     request = _build_mock_request(payload)
     mock_settings = _make_test_settings(
@@ -198,10 +230,24 @@ async def test_successful_insertion_and_successful_publication():
 
     with (
         patch("services.apify_receiver.get_settings", return_value=mock_settings),
-        patch("services.apify_receiver._verify_actor_run", new=AsyncMock(return_value={"id": "run-1", "actId": "act-1", "status": "SUCCEEDED", "defaultDatasetId": "ds-1"})),
-        patch("services.apify_receiver._fetch_dataset_items", new=AsyncMock(return_value=single_item)),
+        patch(
+            "services.apify_receiver._verify_actor_run",
+            new=AsyncMock(
+                return_value={
+                    "id": "run-1",
+                    "actId": "act-1",
+                    "status": "SUCCEEDED",
+                    "defaultDatasetId": "ds-1",
+                }
+            ),
+        ),
+        patch(
+            "services.apify_receiver._fetch_dataset_items", new=AsyncMock(return_value=single_item)
+        ),
         patch("services.apify_receiver.RawJobRepository") as mock_repo_cls,
-        patch("services.apify_receiver._publish_job_ids", new=AsyncMock(return_value=(1, 0))) as mock_pub,
+        patch(
+            "services.apify_receiver._publish_job_ids", new=AsyncMock(return_value=(1, 0))
+        ) as mock_pub,
     ):
         mock_repo = mock_repo_cls.return_value
         mock_repo.batch_insert_jobs = AsyncMock(return_value=["job-success-1"])
@@ -219,15 +265,23 @@ async def test_successful_insertion_and_successful_publication():
 @pytest.mark.asyncio
 async def test_bigquery_insertion_succeeds_but_pubsub_publication_fails():
     """BigQuery insertion succeeds, but Pub/Sub publication fails for all jobs."""
-    single_item = [{
-        "title": "MLOps Engineer",
-        "companyName": "Cloud Inc",
-        "descriptionText": "Deploy ML pipelines and infrastructure on modern cloud architectures." * 2,
-        "jobUrl": "https://example.com/job/mlops-1",
-    }]
+    single_item = [
+        {
+            "title": "MLOps Engineer",
+            "companyName": "Cloud Inc",
+            "descriptionText": "Deploy ML pipelines and infrastructure on modern cloud architectures."
+            * 2,
+            "jobUrl": "https://example.com/job/mlops-1",
+        }
+    ]
     payload = {
         "eventType": "ACTOR.RUN.SUCCEEDED",
-        "resource": {"id": "run-2", "actId": "act-2", "status": "SUCCEEDED", "defaultDatasetId": "ds-2"},
+        "resource": {
+            "id": "run-2",
+            "actId": "act-2",
+            "status": "SUCCEEDED",
+            "defaultDatasetId": "ds-2",
+        },
     }
     request = _build_mock_request(payload)
     mock_settings = _make_test_settings(
@@ -238,8 +292,20 @@ async def test_bigquery_insertion_succeeds_but_pubsub_publication_fails():
 
     with (
         patch("services.apify_receiver.get_settings", return_value=mock_settings),
-        patch("services.apify_receiver._verify_actor_run", new=AsyncMock(return_value={"id": "run-2", "actId": "act-2", "status": "SUCCEEDED", "defaultDatasetId": "ds-2"})),
-        patch("services.apify_receiver._fetch_dataset_items", new=AsyncMock(return_value=single_item)),
+        patch(
+            "services.apify_receiver._verify_actor_run",
+            new=AsyncMock(
+                return_value={
+                    "id": "run-2",
+                    "actId": "act-2",
+                    "status": "SUCCEEDED",
+                    "defaultDatasetId": "ds-2",
+                }
+            ),
+        ),
+        patch(
+            "services.apify_receiver._fetch_dataset_items", new=AsyncMock(return_value=single_item)
+        ),
         patch("services.apify_receiver.RawJobRepository") as mock_repo_cls,
         patch("services.apify_receiver._publish_job_ids", new=AsyncMock(return_value=(0, 1))),
     ):
@@ -262,19 +328,26 @@ async def test_partial_publication_failure():
         {
             "title": "Backend Engineer",
             "companyName": "Tech A",
-            "descriptionText": "Write performant asynchronous backend services using python and fastapi." * 2,
+            "descriptionText": "Write performant asynchronous backend services using python and fastapi."
+            * 2,
             "jobUrl": "https://example.com/job/be-1",
         },
         {
             "title": "Data Scientist",
             "companyName": "Tech B",
-            "descriptionText": "Perform exploratory data analysis and build statistical machine learning models." * 2,
+            "descriptionText": "Perform exploratory data analysis and build statistical machine learning models."
+            * 2,
             "jobUrl": "https://example.com/job/ds-1",
         },
     ]
     payload = {
         "eventType": "ACTOR.RUN.SUCCEEDED",
-        "resource": {"id": "run-3", "actId": "act-3", "status": "SUCCEEDED", "defaultDatasetId": "ds-3"},
+        "resource": {
+            "id": "run-3",
+            "actId": "act-3",
+            "status": "SUCCEEDED",
+            "defaultDatasetId": "ds-3",
+        },
     }
     request = _build_mock_request(payload)
     mock_settings = _make_test_settings(
@@ -285,7 +358,17 @@ async def test_partial_publication_failure():
 
     with (
         patch("services.apify_receiver.get_settings", return_value=mock_settings),
-        patch("services.apify_receiver._verify_actor_run", new=AsyncMock(return_value={"id": "run-3", "actId": "act-3", "status": "SUCCEEDED", "defaultDatasetId": "ds-3"})),
+        patch(
+            "services.apify_receiver._verify_actor_run",
+            new=AsyncMock(
+                return_value={
+                    "id": "run-3",
+                    "actId": "act-3",
+                    "status": "SUCCEEDED",
+                    "defaultDatasetId": "ds-3",
+                }
+            ),
+        ),
         patch("services.apify_receiver._fetch_dataset_items", new=AsyncMock(return_value=items)),
         patch("services.apify_receiver.RawJobRepository") as mock_repo_cls,
         patch("services.apify_receiver._publish_job_ids", new=AsyncMock(return_value=(1, 1))),
@@ -305,15 +388,23 @@ async def test_partial_publication_failure():
 @pytest.mark.asyncio
 async def test_webhook_retry_after_jobs_are_already_stored():
     """Webhook retries for a batch already stored in BQ; discovers unembedded NEW_RAW jobs and publishes them."""
-    items = [{
-        "title": "Computer Vision Engineer",
-        "companyName": "Vision Labs",
-        "descriptionText": "Design real-time object detection models with PyTorch and deploy with TensorRT." * 2,
-        "jobUrl": "https://example.com/job/cv-1",
-    }]
+    items = [
+        {
+            "title": "Computer Vision Engineer",
+            "companyName": "Vision Labs",
+            "descriptionText": "Design real-time object detection models with PyTorch and deploy with TensorRT."
+            * 2,
+            "jobUrl": "https://example.com/job/cv-1",
+        }
+    ]
     payload = {
         "eventType": "ACTOR.RUN.SUCCEEDED",
-        "resource": {"id": "run-retry", "actId": "act-retry", "status": "SUCCEEDED", "defaultDatasetId": "ds-retry"},
+        "resource": {
+            "id": "run-retry",
+            "actId": "act-retry",
+            "status": "SUCCEEDED",
+            "defaultDatasetId": "ds-retry",
+        },
     }
     request = _build_mock_request(payload)
     mock_settings = _make_test_settings(
@@ -324,10 +415,22 @@ async def test_webhook_retry_after_jobs_are_already_stored():
 
     with (
         patch("services.apify_receiver.get_settings", return_value=mock_settings),
-        patch("services.apify_receiver._verify_actor_run", new=AsyncMock(return_value={"id": "run-retry", "actId": "act-retry", "status": "SUCCEEDED", "defaultDatasetId": "ds-retry"})),
+        patch(
+            "services.apify_receiver._verify_actor_run",
+            new=AsyncMock(
+                return_value={
+                    "id": "run-retry",
+                    "actId": "act-retry",
+                    "status": "SUCCEEDED",
+                    "defaultDatasetId": "ds-retry",
+                }
+            ),
+        ),
         patch("services.apify_receiver._fetch_dataset_items", new=AsyncMock(return_value=items)),
         patch("services.apify_receiver.RawJobRepository") as mock_repo_cls,
-        patch("services.apify_receiver._publish_job_ids", new=AsyncMock(return_value=(1, 0))) as mock_pub,
+        patch(
+            "services.apify_receiver._publish_job_ids", new=AsyncMock(return_value=(1, 0))
+        ) as mock_pub,
     ):
         mock_repo = mock_repo_cls.return_value
         # BQ deduplication returns empty list (all duplicate)
@@ -354,11 +457,15 @@ async def test_reconciliation_recovering_saved_but_unpublished_jobs():
         pubsub_embedding_topic="test-t",
     )
     mock_repo = AsyncMock()
-    mock_repo.get_unembedded_job_ids = AsyncMock(return_value=["saved-unembedded-1", "saved-unembedded-2"])
+    mock_repo.get_unembedded_job_ids = AsyncMock(
+        return_value=["saved-unembedded-1", "saved-unembedded-2"]
+    )
 
     with (
         patch("services.apify_receiver.get_settings", return_value=mock_settings),
-        patch("services.apify_receiver._publish_job_ids", new=AsyncMock(return_value=(2, 0))) as mock_pub,
+        patch(
+            "services.apify_receiver._publish_job_ids", new=AsyncMock(return_value=(2, 0))
+        ) as mock_pub,
     ):
         result = await reconcile_unpublished_jobs(limit=50, min_age_seconds=60, repo=mock_repo)
 
@@ -366,7 +473,9 @@ async def test_reconciliation_recovering_saved_but_unpublished_jobs():
     assert result["published"] == 2
     assert result["publish_failures"] == 0
     assert result["job_ids"] == ["saved-unembedded-1", "saved-unembedded-2"]
-    mock_repo.get_unembedded_job_ids.assert_awaited_once_with(job_ids=None, limit=50, min_age_seconds=60)
+    mock_repo.get_unembedded_job_ids.assert_awaited_once_with(
+        job_ids=None, limit=50, min_age_seconds=60
+    )
     mock_pub.assert_awaited_once_with(
         ["saved-unembedded-1", "saved-unembedded-2"],
         project_id="test-p",
@@ -510,7 +619,9 @@ async def test_fetch_dataset_items_handles_timeouts_and_network_errors():
 
     # Request error / connection refused
     request = httpx.Request("GET", "https://api.apify.com/v2/datasets/ds-err/items?format=json")
-    mock_client.get = AsyncMock(side_effect=httpx.ConnectError("Connection refused", request=request))
+    mock_client.get = AsyncMock(
+        side_effect=httpx.ConnectError("Connection refused", request=request)
+    )
     with pytest.raises(HTTPException) as exc_info:
         await _fetch_dataset_items("ds-err", api_token, client=mock_client)
     assert exc_info.value.status_code == 502
@@ -555,7 +666,9 @@ async def test_fetch_dataset_items_logs_and_errors_never_reveal_token(
             "https://api.apify.com/v2/datasets/ds-security-audit/items?format=json&clean=true",
             headers={"Authorization": f"Bearer {secret_token}"},
         )
-        mock_client.get = AsyncMock(side_effect=httpx.ConnectError("Network is unreachable", request=request))
+        mock_client.get = AsyncMock(
+            side_effect=httpx.ConnectError("Network is unreachable", request=request)
+        )
         with pytest.raises(HTTPException) as exc_info:
             await _fetch_dataset_items(dataset_id, secret_token, client=mock_client)
         assert secret_token not in exc_info.value.detail
@@ -573,6 +686,7 @@ async def test_fetch_dataset_items_logs_and_errors_never_reveal_token(
         assert secret_token not in record.message
         if record.exc_info:
             import traceback
+
             tb_str = "".join(traceback.format_exception(*record.exc_info))
             # If the ValueError mock deliberately contained the token, check that app logs didn't log it
             assert secret_token not in tb_str
@@ -580,13 +694,19 @@ async def test_fetch_dataset_items_logs_and_errors_never_reveal_token(
 
 # ── Webhook Trust Boundary & Security Tests (BUG 3) ───────────────────────────
 
+
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_webhook_missing_auth_configuration_in_production():
     """Missing APIFY_WEBHOOK_SECRET in production environment must fail with 500 error."""
     payload = {
         "eventType": "ACTOR.RUN.SUCCEEDED",
-        "resource": {"id": "run-1", "actId": "act-1", "status": "SUCCEEDED", "defaultDatasetId": "ds-1"},
+        "resource": {
+            "id": "run-1",
+            "actId": "act-1",
+            "status": "SUCCEEDED",
+            "defaultDatasetId": "ds-1",
+        },
     }
     request = _build_mock_request(payload)
     prod_settings = _make_test_settings(
@@ -619,7 +739,12 @@ async def test_webhook_missing_or_invalid_credentials():
     """Requests with missing or invalid HMAC signatures / secret headers must be rejected with 401."""
     payload = {
         "eventType": "ACTOR.RUN.SUCCEEDED",
-        "resource": {"id": "run-1", "actId": "act-1", "status": "SUCCEEDED", "defaultDatasetId": "ds-1"},
+        "resource": {
+            "id": "run-1",
+            "actId": "act-1",
+            "status": "SUCCEEDED",
+            "defaultDatasetId": "ds-1",
+        },
     }
     settings_with_secret = _make_test_settings(
         environment="production",
@@ -686,7 +811,9 @@ async def test_webhook_malformed_json_and_payloads():
         assert exc2.value.status_code == 400
 
         # 3. Missing eventType -> 422
-        req_no_event = _build_mock_request({"resource": {"id": "1", "actId": "1", "defaultDatasetId": "ds"}})
+        req_no_event = _build_mock_request(
+            {"resource": {"id": "1", "actId": "1", "defaultDatasetId": "ds"}}
+        )
         with pytest.raises(HTTPException) as exc3:
             await apify_webhook(req_no_event)
         assert exc3.value.status_code == 422
@@ -698,10 +825,17 @@ async def test_webhook_malformed_json_and_payloads():
         assert exc4.value.status_code == 422
 
         # 5. Missing dataset ID -> 422
-        req_no_ds = _build_mock_request({
-            "eventType": "ACTOR.RUN.SUCCEEDED",
-            "resource": {"id": "run-1", "actId": "act-1", "status": "SUCCEEDED", "defaultDatasetId": ""},
-        })
+        req_no_ds = _build_mock_request(
+            {
+                "eventType": "ACTOR.RUN.SUCCEEDED",
+                "resource": {
+                    "id": "run-1",
+                    "actId": "act-1",
+                    "status": "SUCCEEDED",
+                    "defaultDatasetId": "",
+                },
+            }
+        )
         with pytest.raises(HTTPException) as exc5:
             await apify_webhook(req_no_ds)
         assert exc5.value.status_code == 422
@@ -717,7 +851,12 @@ async def test_webhook_unexpected_event_types():
     """Non-SUCCEEDED event types are ignored without touching BQ or Pub/Sub."""
     payload = {
         "eventType": "ACTOR.RUN.FAILED",
-        "resource": {"id": "run-1", "actId": "act-1", "status": "FAILED", "defaultDatasetId": "ds-1"},
+        "resource": {
+            "id": "run-1",
+            "actId": "act-1",
+            "status": "FAILED",
+            "defaultDatasetId": "ds-1",
+        },
     }
     request = _build_mock_request(payload)
     settings = _make_test_settings(
@@ -748,7 +887,12 @@ async def test_webhook_failed_actor_runs():
     """Actor runs that did not succeed (e.g. status != SUCCEEDED) are skipped."""
     payload = {
         "eventType": "ACTOR.RUN.SUCCEEDED",
-        "resource": {"id": "run-1", "actId": "act-1", "status": "ABORTED", "defaultDatasetId": "ds-1"},
+        "resource": {
+            "id": "run-1",
+            "actId": "act-1",
+            "status": "ABORTED",
+            "defaultDatasetId": "ds-1",
+        },
     }
     request = _build_mock_request(payload)
     settings = _make_test_settings(
@@ -840,7 +984,10 @@ async def test_webhook_dataset_id_mismatch():
 
     with (
         patch("services.apify_receiver.get_settings", return_value=settings),
-        patch("services.apify_receiver._verify_actor_run", new=AsyncMock(return_value=verified_run_data)),
+        patch(
+            "services.apify_receiver._verify_actor_run",
+            new=AsyncMock(return_value=verified_run_data),
+        ),
         patch("services.apify_receiver._fetch_dataset_items") as mock_fetch,
         patch("services.apify_receiver.RawJobRepository") as mock_repo_cls,
         patch("services.apify_receiver._publish_job_ids") as mock_pub,
@@ -892,19 +1039,29 @@ async def test_webhook_valid_authenticated_and_verified_run():
         "status": "SUCCEEDED",
         "defaultDatasetId": "ds-legit-123",
     }
-    sample_dataset = [{
-        "title": "Machine Learning Engineer",
-        "companyName": "TechCorp",
-        "descriptionText": "Develop advanced deep learning models and agentic workflows." * 2,
-        "jobUrl": "https://example.com/job/valid-1",
-    }]
+    sample_dataset = [
+        {
+            "title": "Machine Learning Engineer",
+            "companyName": "TechCorp",
+            "descriptionText": "Develop advanced deep learning models and agentic workflows." * 2,
+            "jobUrl": "https://example.com/job/valid-1",
+        }
+    ]
 
     with (
         patch("services.apify_receiver.get_settings", return_value=settings),
-        patch("services.apify_receiver._verify_actor_run", new=AsyncMock(return_value=verified_run_data)) as mock_verify,
-        patch("services.apify_receiver._fetch_dataset_items", new=AsyncMock(return_value=sample_dataset)) as mock_fetch,
+        patch(
+            "services.apify_receiver._verify_actor_run",
+            new=AsyncMock(return_value=verified_run_data),
+        ) as mock_verify,
+        patch(
+            "services.apify_receiver._fetch_dataset_items",
+            new=AsyncMock(return_value=sample_dataset),
+        ) as mock_fetch,
         patch("services.apify_receiver.RawJobRepository") as mock_repo_cls,
-        patch("services.apify_receiver._publish_job_ids", new=AsyncMock(return_value=(1, 0))) as mock_pub,
+        patch(
+            "services.apify_receiver._publish_job_ids", new=AsyncMock(return_value=(1, 0))
+        ) as mock_pub,
     ):
         mock_repo = mock_repo_cls.return_value
         mock_repo.batch_insert_jobs = AsyncMock(return_value=["job-valid-1"])

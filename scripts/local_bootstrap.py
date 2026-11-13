@@ -56,7 +56,9 @@ def validate_env() -> bool:
     ]
     unset = [var for var in optional_recommended if not os.environ.get(var)]
     if unset:
-        logger.info("Optional/downstream env vars not set (okay for BQ bootstrap): %s", ", ".join(unset))
+        logger.info(
+            "Optional/downstream env vars not set (okay for BQ bootstrap): %s", ", ".join(unset)
+        )
 
     logger.info("Environment validation passed [OK]")
     return True

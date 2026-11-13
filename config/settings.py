@@ -50,20 +50,21 @@ class Settings(BaseSettings):
     litellm_proxy_api_key: str = Field(default="", exclude=True)
 
     # ── LangFuse ──────────────────────────────────────────────────────────────
-    langfuse_public_key: str = Field(default="", description="LangFuse public key (from env or Secret Mgr)")
+    langfuse_public_key: str = Field(
+        default="", description="LangFuse public key (from env or Secret Mgr)"
+    )
     langfuse_secret_key: str = Field(default="", description="LangFuse secret key")
     langfuse_host: str = Field(default="https://cloud.langfuse.com")
 
     # ── Telegram ──────────────────────────────────────────────────────────────
     telegram_bot_token_secret: str = Field(
-        default="telegram-bot-token", description="Secret Manager secret name for Telegram bot token"
+        default="telegram-bot-token",
+        description="Secret Manager secret name for Telegram bot token",
     )
     telegram_bot_token: str = Field(default="", exclude=True)
 
     # ── Firestore ─────────────────────────────────────────────────────────────
-    firestore_database_id: str = Field(
-        default="(default)", description="Firestore database ID"
-    )
+    firestore_database_id: str = Field(default="(default)", description="Firestore database ID")
 
     # ── Pub/Sub ───────────────────────────────────────────────────────────────
     pubsub_embedding_topic: str = Field(
@@ -86,7 +87,9 @@ class Settings(BaseSettings):
     )
 
     # ── Apify ─────────────────────────────────────────────────────────────────
-    apify_webhook_secret: str = Field(default="", description="HMAC secret for Apify webhook validation")
+    apify_webhook_secret: str = Field(
+        default="", description="HMAC secret for Apify webhook validation"
+    )
     apify_api_token_secret: str = Field(
         default="apify-api-token",
         description="Secret Manager secret name for the Apify API token",
@@ -100,21 +103,31 @@ class Settings(BaseSettings):
 
     # ── Scoring Thresholds ─────────────────────────────────────────────────────
     notification_score_threshold: int = Field(
-        default=85, ge=0, le=100,
-        description="Minimum agreed_score to trigger Telegram notification (default per user)"
+        default=85,
+        ge=0,
+        le=100,
+        description="Minimum agreed_score to trigger Telegram notification (default per user)",
     )
     debate_score_delta_threshold: int = Field(
-        default=10, ge=1, le=50,
-        description="If |scorer - skeptic| > this, trigger round 2 of debate"
+        default=10,
+        ge=1,
+        le=50,
+        description="If |scorer - skeptic| > this, trigger round 2 of debate",
     )
 
     # ── Deduplication ─────────────────────────────────────────────────────────
     dedup_window_days: int = Field(default=90, ge=1, le=365, description="BQ dedup window in days")
 
     # ── Retrieval ─────────────────────────────────────────────────────────────
-    vector_search_top_k: int = Field(default=50, ge=1, le=200, description="Step A: BQ VECTOR_SEARCH top K")
-    prefilter_max_results: int = Field(default=15, ge=1, le=50, description="Step B: regex gate max output")
-    prefilter_max_yoe: int = Field(default=5, ge=0, le=30, description="Maximum YOE allowed through prefilter")
+    vector_search_top_k: int = Field(
+        default=50, ge=1, le=200, description="Step A: BQ VECTOR_SEARCH top K"
+    )
+    prefilter_max_results: int = Field(
+        default=15, ge=1, le=50, description="Step B: regex gate max output"
+    )
+    prefilter_max_yoe: int = Field(
+        default=5, ge=0, le=30, description="Maximum YOE allowed through prefilter"
+    )
 
     @field_validator("bq_location")
     @classmethod
@@ -130,6 +143,7 @@ class Settings(BaseSettings):
                 return []
             if v.startswith("[") and v.endswith("]"):
                 import json
+
                 try:
                     parsed = json.loads(v)
                     if isinstance(parsed, list):
@@ -160,9 +174,7 @@ class Settings(BaseSettings):
         if not self.e2b_api_key:
             self.e2b_api_key = _fetch_secret(self.gcp_project_id, self.e2b_api_key_secret)
         if not self.apify_api_token:
-            self.apify_api_token = _fetch_secret(
-                self.gcp_project_id, self.apify_api_token_secret
-            )
+            self.apify_api_token = _fetch_secret(self.gcp_project_id, self.apify_api_token_secret)
         return self
 
 

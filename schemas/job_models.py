@@ -114,6 +114,4 @@ class EvaluatedJob(BaseModel):
     strengths: list[str] = Field(default_factory=list)
     evaluated_at: datetime = Field(default_factory=utcnow)
     notified_at: Optional[datetime] = None
-    tier2_status: Optional[str] = Field(
-        None, description="NULL | PENDING | IN_PROGRESS | COMPLETE"
-    )
+    tier2_status: Optional[str] = Field(None, description="NULL | PENDING | IN_PROGRESS | COMPLETE")

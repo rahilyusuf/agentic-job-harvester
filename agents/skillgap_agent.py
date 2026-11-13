@@ -77,17 +77,23 @@ class SkillGapAgent(BaseIntelligenceAgent):
     def _build_challenge_messages(self, skill: str, context: str) -> list[dict[str, str]]:
         """Build messages for generating a Python challenge for a specific blocking skill."""
         return [
-            {"role": "system", "content": (
-                "Generate a concise Python coding challenge (20-40 lines) that demonstrates "
-                f"practical competency in {skill}. "
-                "The code must be self-contained, runnable, and produce clear output. "
-                "Include comments explaining what it demonstrates."
-            )},
-            {"role": "user", "content": (
-                f"Create a runnable Python challenge for: {skill}\n"
-                f"Job context: {context[:500]}\n"
-                "Return only executable Python code, no markdown fences."
-            )},
+            {
+                "role": "system",
+                "content": (
+                    "Generate a concise Python coding challenge (20-40 lines) that demonstrates "
+                    f"practical competency in {skill}. "
+                    "The code must be self-contained, runnable, and produce clear output. "
+                    "Include comments explaining what it demonstrates."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Create a runnable Python challenge for: {skill}\n"
+                    f"Job context: {context[:500]}\n"
+                    "Return only executable Python code, no markdown fences."
+                ),
+            },
         ]
 
     @observe(name="SkillGapAgent")

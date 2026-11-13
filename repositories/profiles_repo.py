@@ -58,7 +58,9 @@ class ProfileRepository:
         errors = self._client.insert_rows_json(self._table, [row])
         if errors:
             # For updates, try a DML query
-            logger.warning("Streaming insert failed; attempting DML for user_id=%s", profile.user_id)
+            logger.warning(
+                "Streaming insert failed; attempting DML for user_id=%s", profile.user_id
+            )
             e_active = json.dumps(profile.e_active_user)
             e_resume = json.dumps(profile.e_resume)
             query = f"""
