@@ -60,9 +60,11 @@ class UserProfile(BaseModel):
         ..., min_length=768, max_length=768,
         description="768-dim text-embedding-004 of resume text (base vector)"
     )
-    e_active_user: list[float] = Field(
-        ..., min_length=768, max_length=768,
-        description="768-dim active centroid: (1-α)*e_resume + α*e_accepted_centroid"
+    e_active_user: list[float] | None = Field(
+        default=None,
+        min_length=768,
+        max_length=768,
+        description="768-dim active centroid: (1-α)*e_resume + α*e_accepted_centroid",
     )
     active_vector_alpha: float = Field(
         0.0, ge=0.0, le=1.0,

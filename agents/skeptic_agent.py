@@ -117,14 +117,18 @@ class SkepticAgent(BaseIntelligenceAgent):
             trace_id=trace_id,
         )
 
-        # Enforce round_2 trigger logic based on score delta
+        # Enforce round_2 trigger logic based on score delta and veto authority
         delta = abs(scorer_output.initial_score - output.agreed_score)
-        should_request_r2 = (
-            delta > self._settings.debate_score_delta_threshold and round_number == 1
-        )
-        if should_request_r2 and not output.request_round_2:
-            # Override model's decision — the delta rule is deterministic
-            object.__setattr__(output, "request_round_2", True)
+        if output.veto:
+            if output.request_round_2:
+                object.__setattr__(output, "request_round_2", False)
+        else:
+            should_request_r2 = (
+                delta > self._settings.debate_score_delta_threshold and round_number == 1
+            )
+            if should_request_r2 and not output.request_round_2:
+                # Override model's decision — the delta rule is deterministic
+                object.__setattr__(output, "request_round_2", True)
 
         logger.info(
             "SkepticAgent: job_id=%s round=%d agreed_score=%d veto=%s delta=%d r2=%s",
