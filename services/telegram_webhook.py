@@ -25,10 +25,20 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # type: ignore[type-arg]
+    _LOG_FORMAT = "%(asctime)s %(levelname)-8s %(name)s  %(message)s"
+    _LOG_DATEFMT = "%Y-%m-%dT%H:%M:%S"
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    if not root_logger.handlers:
+        import sys
+        _handler = logging.StreamHandler(sys.stdout)
+        _handler.setFormatter(logging.Formatter(fmt=_LOG_FORMAT, datefmt=_LOG_DATEFMT))
+        root_logger.addHandler(_handler)
     setup_observability()
     logger.info("telegram-webhook started")
     yield
     flush_observability()
+    logger.info("telegram-webhook shutting down")
 
 
 app = FastAPI(

@@ -28,8 +28,8 @@ class IRawJobRepository(Protocol):
         """Insert a new job record. No-op if job_id already exists within dedup window."""
         ...
 
-    async def batch_insert_jobs(self, jobs: list[RawJob]) -> int:
-        """Batch insert jobs. Returns number of novel (non-duplicate) jobs inserted."""
+    async def batch_insert_jobs(self, jobs: list[RawJob]) -> list[str]:
+        """Batch insert jobs. Returns list of newly inserted job_ids (empty if all duplicates)."""
         ...
 
     async def exists(self, job_id: str) -> bool:
@@ -46,6 +46,15 @@ class IRawJobRepository(Protocol):
 
     async def get_jobs_pending_embedding(self, limit: int = 100) -> list[RawJob]:
         """Return jobs with status=EMBEDDING_QUEUED, ordered by scraped_at ASC."""
+        ...
+
+    async def get_unembedded_job_ids(
+        self,
+        job_ids: list[str] | None = None,
+        limit: int = 100,
+        min_age_seconds: int = 0,
+    ) -> list[str]:
+        """Fetch job IDs saved in raw_job_postings that remain unembedded (status=NEW_RAW)."""
         ...
 
 

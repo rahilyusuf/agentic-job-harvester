@@ -11,6 +11,7 @@ import logging
 
 from agents.base import BaseIntelligenceAgent
 from observability.setup import observe
+from orchestration.input_sanitizer import format_job_for_prompt
 from schemas.job_models import RawJob
 from schemas.scoring_models import ScorerOutput
 
@@ -68,16 +69,13 @@ class ScorerAgent(BaseIntelligenceAgent):
                 "Revise your score taking this feedback into account."
             )
 
+        job_block = format_job_for_prompt(job, max_description_chars=3000)
         return [
             self._system_message(),
             self._user_message(
                 f"## Candidate Resume Summary\n{resume_summary}\n\n"
                 f"## Active Preference Rules\n{rules_text}\n\n"
-                f"## Job Posting\n"
-                f"Title: {job.title}\n"
-                f"Company: {job.company}\n"
-                f"Location: {job.location or 'Not specified'}\n"
-                f"Description:\n{job.description[:3000]}\n"
+                f"## Job Posting\n{job_block}\n"
                 f"{round_context}\n"
                 f"Score this role. job_id={job.job_id} user_id={user_id} round={round_number}"
             ),
