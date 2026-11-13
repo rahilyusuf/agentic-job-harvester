@@ -9,24 +9,14 @@ These tests verify that structural isolation is the outcome, not that any specif
 keyword is removed.
 """
 
-import importlib.util
-import sys
-from pathlib import Path
-
 import pytest
 
-# Import input_sanitizer directly from its module file to avoid executing
-# orchestration/__init__.py, which eagerly imports pipeline.py → agents → pydantic.
-# The sanitizer itself has zero third-party dependencies — this isolation is correct.
-_module_path = Path(__file__).parents[2] / "orchestration" / "input_sanitizer.py"
-_spec = importlib.util.spec_from_file_location("input_sanitizer", _module_path)
-_mod = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_mod)
-
-SCRAPE_MAX_CHARS = _mod.SCRAPE_MAX_CHARS
-sanitize_scraped_text = _mod.sanitize_scraped_text
-sanitize_job_fields = _mod.sanitize_job_fields
-format_job_for_prompt = _mod.format_job_for_prompt
+from orchestration.input_sanitizer import (
+    SCRAPE_MAX_CHARS,
+    format_job_for_prompt,
+    sanitize_job_fields,
+    sanitize_scraped_text,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
