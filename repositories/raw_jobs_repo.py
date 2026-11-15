@@ -1,4 +1,4 @@
-﻿"""repositories/raw_jobs_repo.py — Concrete BigQuery adapter for raw_job_postings.
+"""repositories/raw_jobs_repo.py — Concrete BigQuery adapter for raw_job_postings.
 
 Implements IRawJobRepository. Only import this class in:
   - services/apify_receiver.py (for injection)
@@ -17,6 +17,7 @@ from google.cloud import bigquery
 from google.cloud.exceptions import NotFound
 
 from config.settings import Settings, get_settings
+from observability.ingestion_logging import emit
 from schemas.job_models import JobStatus, RawJob
 from utils.retry import async_retry
 from utils.time import format_bq_timestamp, get_dedup_window_start
@@ -53,14 +54,14 @@ class RawJobRepository:
     async def insert_job(self, job: RawJob) -> None:
         """Insert a new job. Skips silently if duplicate within dedup window."""
         if await self.exists(job.job_id):
-            logger.debug("Skipping duplicate job_id=%s", job.job_id)
+            emit("ingestion.bigquery.record_existing", logging.DEBUG)
             return
 
         row = job.model_dump(mode="json")
         errors = self._client.insert_rows_json(self._table, [row])
         if errors:
             raise RuntimeError(f"BQ insert errors for job_id={job.job_id}: {errors}")
-        logger.info("Inserted job_id=%s", job.job_id)
+        emit("ingestion.bigquery.record_inserted", logging.DEBUG)
 
     @async_retry(max_attempts=3, base_delay=1.0)
     async def batch_insert_jobs(self, jobs: list[RawJob]) -> list[str]:
@@ -92,7 +93,12 @@ class RawJobRepository:
 
         novel_jobs = [j for j in jobs if j.job_id not in existing]
         if not novel_jobs:
-            logger.info("All %d jobs are duplicates; nothing inserted.", len(jobs))
+            emit(
+                "ingestion.bigquery.batch_existing",
+                logging.DEBUG,
+                unique=len(jobs),
+                existing_duplicates=len(jobs),
+            )
             return []
 
         rows = [j.model_dump(mode="json") for j in novel_jobs]
@@ -102,7 +108,13 @@ class RawJobRepository:
             raise RuntimeError(f"BQ batch insert errors: {errors}")
 
         novel_ids = [j.job_id for j in novel_jobs]
-        logger.info("Batch inserted %d/%d novel jobs.", len(novel_jobs), len(jobs))
+        emit(
+            "ingestion.bigquery.batch_inserted",
+            logging.DEBUG,
+            inserted=len(novel_ids),
+            unique=len(jobs),
+            existing_duplicates=len(existing),
+        )
         return novel_ids
 
     async def exists(self, job_id: str) -> bool:

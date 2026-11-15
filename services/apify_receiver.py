@@ -1,4 +1,4 @@
-﻿"""services/apify_receiver.py — Apify webhook ingestion consumer (Cloud Run).
+"""services/apify_receiver.py — Apify webhook ingestion consumer (Cloud Run).
 
 Real Apify integration flow:
     Apify Actor run completes
@@ -38,6 +38,7 @@ import json
 import logging
 import sys
 from contextlib import asynccontextmanager
+from time import perf_counter
 from typing import Any, cast
 
 import httpx
@@ -47,6 +48,16 @@ from google.cloud import pubsub_v1
 
 from config.settings import get_settings
 from observability.setup import flush_observability, setup_observability
+from observability.ingestion_logging import (
+    COUNTERS,
+    configure_ingestion_logging,
+    context,
+    emit,
+    error_fields,
+    request_context,
+    stage,
+    stop_ingestion_logging,
+)
 from repositories.raw_jobs_repo import RawJobRepository
 from services.normalizers import apify_career_scraper
 from services.normalizers.batch import normalize_batch
@@ -89,10 +100,14 @@ async def lifespan(app: FastAPI):  # type: ignore[type-arg]
         _handler.setFormatter(logging.Formatter(fmt=_LOG_FORMAT, datefmt=_LOG_DATEFMT))
         root_logger.addHandler(_handler)
     setup_observability()
+    ingestion_listener = configure_ingestion_logging()
     logger.info("apify-receiver started")
-    yield
-    flush_observability()
-    logger.info("apify-receiver shutting down")
+    try:
+        yield
+    finally:
+        flush_observability()
+        stop_ingestion_logging(ingestion_listener)
+        logger.info("apify-receiver shutting down")
 
 
 # ── FastAPI app ────────────────────────────────────────────────────────────────
@@ -125,6 +140,60 @@ async def health() -> dict[str, str]:
 
 @app.post("/webhook/apify", status_code=status.HTTP_202_ACCEPTED)
 async def apify_webhook(request: Request) -> dict[str, Any]:
+    """Receive an Apify event with safe, request-scoped lifecycle logging."""
+    with request_context(request.headers.get("X-Request-ID")) as state:
+        emit("ingestion.webhook.received")
+        try:
+            result = await _ingest_webhook(request)
+        except Exception as exc:
+            code = exc.status_code if isinstance(exc, HTTPException) else 500
+            rejected = code < 500 and state.stage in {
+                "authentication",
+                "event_validation",
+                "actor_authorization",
+            }
+            category = "request_rejected" if rejected else "operation_failed"
+            fields: dict[str, object] = {}
+            if state.stage == "bigquery":
+                category = "persistence_unconfirmed"
+                fields["persistence_outcome"] = "unconfirmed"
+            emit(
+                "ingestion.failed",
+                logging.WARNING if rejected else logging.ERROR,
+                error_category=category,
+                status_code=code,
+                duration_ms=round((perf_counter() - state.started) * 1000),
+                **state.counters,
+                **error_fields(exc),
+                **fields,
+            )
+            raise
+        if not isinstance(result.get("received"), int):
+            return result  # Ignored events have their own explicit terminal event.
+        counts = {key: result.get(key, state.counters.get(key) or 0) for key in COUNTERS}
+        outcome = "success"
+        if counts["publish_failures"] and not counts["published"]:
+            outcome = "publication_unconfirmed"
+        elif counts["publish_failures"] or state.incomplete:
+            outcome = "partial"
+        elif counts["rejected"]:
+            outcome = "completed_with_rejections"
+        elif counts["received"] == 0:
+            outcome = "empty"
+        emit(
+            "ingestion.completed",
+            logging.WARNING
+            if counts["publish_failures"] or state.incomplete or counts["rejected"]
+            else logging.INFO,
+            outcome=outcome,
+            subscriber_processing="not_observed",
+            duration_ms=round((perf_counter() - state.started) * 1000),
+            **counts,
+        )
+        return result
+
+
+async def _ingest_webhook(request: Request) -> dict[str, Any]:
     """Receive an ACTOR.RUN.SUCCEEDED event from Apify.
 
     The webhook body is a small event payload — NOT the scraped data.
@@ -156,14 +225,38 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
     """
     settings = get_settings()
 
-    logger.info("── APIFY WEBHOOK START ──────────────────────────────────────")
+    stage("authentication")
+    state = context()
+    if state:
+        state.secrets = [
+            value
+            for name in (
+                "apify_api_token",
+                "apify_webhook_secret",
+                "litellm_proxy_api_key",
+                "telegram_bot_token",
+                "e2b_api_key",
+                "langfuse_secret_key",
+            )
+            if isinstance(value := getattr(settings, name, None), str) and value
+        ]
+        for header in (
+            "Authorization",
+            "X-Apify-Signature",
+            "X-Apify-Webhook-Secret",
+            "X-Dev-Token",
+        ):
+            value = request.headers.get(header, "")
+            if value:
+                state.secrets.append(value)
+                if header == "Authorization" and value.startswith("Bearer "):
+                    state.secrets.append(value[7:].strip())
 
     # ── Step 1: Read raw body before any parsing ───────────────────────────────
     body = await request.body()
 
     # ── Step 2: Inbound Authentication Enforcement ────────────────────────────
     if settings.is_production and not settings.apify_webhook_secret:
-        logger.error("APIFY_WEBHOOK_SECRET is not configured in production environment!")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Webhook authentication secret is not configured in production",
@@ -190,17 +283,18 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
         )
 
         if not (is_valid_hmac or is_valid_secret_header or is_valid_bearer):
-            client_ip = request.client.host if request.client else "unknown"
-            logger.warning(
-                "Unauthorized webhook request from %s (missing or invalid credentials)",
-                client_ip,
-            )
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Missing or invalid webhook credentials",
             )
 
     # ── Step 3: Parse JSON body ────────────────────────────────────────────────
+    emit(
+        "ingestion.authentication.checked",
+        verified=bool(settings.apify_webhook_secret),
+        authentication_required=bool(settings.apify_webhook_secret),
+    )
+    stage("event_validation")
     try:
         payload: dict[str, Any] = json.loads(body)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -223,7 +317,7 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
             detail="Webhook payload missing eventType",
         )
     if event_type != "ACTOR.RUN.SUCCEEDED":
-        logger.info("Ignoring non-success event type: %s", event_type)
+        emit("ingestion.ignored", outcome="ignored")
         return {
             "received": event_type,
             "inserted": 0,
@@ -241,7 +335,7 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
 
     run_status: str = resource.get("status", "SUCCEEDED")
     if run_status != "SUCCEEDED":
-        logger.info("Actor run status '%s' is not SUCCEEDED; skipping", run_status)
+        emit("ingestion.ignored", outcome="ignored")
         return {
             "received": run_status,
             "inserted": 0,
@@ -258,39 +352,27 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
     dataset_id: str = resource.get("defaultDatasetId", "").strip()
 
     if not actor_run_id or not actor_id or not dataset_id:
-        logger.error(
-            "Malformed webhook payload: missing id, actId, or defaultDatasetId | run_id=%s act_id=%s dataset_id=%s",
-            actor_run_id,
-            actor_id,
-            dataset_id,
-        )
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Webhook payload missing required fields (id, actId, defaultDatasetId)",
         )
 
-    logger.info(
-        "── WEBHOOK PARSED  actor_id=%s  actor_run_id=%s  dataset_id=%s",
-        actor_id,
-        actor_run_id,
-        dataset_id,
-    )
+    if state:
+        state.actor_run_id = actor_run_id
+        state.dataset_id = dataset_id
+    emit("ingestion.event.validated")
+    stage("actor_authorization")
 
     # ── Step 5b: Actor allowlist authorization ────────────────────────────────
     if settings.apify_allowed_actor_ids and actor_id not in settings.apify_allowed_actor_ids:
-        logger.warning(
-            "Unauthorized actor_id=%s not in allowlist: %s",
-            actor_id,
-            settings.apify_allowed_actor_ids,
-        )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Actor ID '{actor_id}' is not authorized",
         )
 
     # ── Step 6: Verify actor run directly with Apify API ───────────────────────
+    emit("ingestion.actor.authorized", allowlist_enforced=bool(settings.apify_allowed_actor_ids))
     if not settings.apify_api_token:
-        logger.error("apify_api_token is not configured; cannot verify run or fetch dataset items")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=(
@@ -300,15 +382,11 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
             ),
         )
 
-    logger.info("── VERIFYING ACTOR RUN  actor_run_id=%s", actor_run_id)
+    stage("actor_verification")
+    emit("ingestion.actor.verification_started")
     verified_run = await _verify_actor_run(actor_run_id, settings.apify_api_token)
     verified_status = verified_run.get("status")
     if verified_status != "SUCCEEDED":
-        logger.warning(
-            "Verified actor run status is not SUCCEEDED: status=%s actor_run_id=%s",
-            verified_status,
-            actor_run_id,
-        )
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Verified actor run status is '{verified_status}', expected 'SUCCEEDED'",
@@ -316,35 +394,37 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
 
     verified_act_id = verified_run.get("actId") or verified_run.get("actorId")
     if settings.apify_allowed_actor_ids and verified_act_id not in settings.apify_allowed_actor_ids:
-        logger.warning(
-            "Verified actor run actId=%s is not in allowed actor IDs: %s",
-            verified_act_id,
-            settings.apify_allowed_actor_ids,
-        )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Verified actor ID '{verified_act_id}' is not authorized",
         )
 
+    emit(
+        "ingestion.actor.verified",
+        verified=True,
+        allowlist_enforced=bool(settings.apify_allowed_actor_ids),
+    )
+    stage("dataset_verification")
     verified_dataset_id = (verified_run.get("defaultDatasetId") or "").strip()
     if verified_dataset_id and verified_dataset_id != dataset_id:
-        logger.error(
-            "Dataset ID mismatch: payload specifies '%s' but verified run produced '%s'",
-            dataset_id,
-            verified_dataset_id,
-        )
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Dataset ID mismatch: payload specifies '{dataset_id}' but run produced '{verified_dataset_id}'",
         )
 
-    logger.info("── FETCHING DATASET  dataset_id=%s", dataset_id)
+    if not verified_dataset_id and state:
+        state.incomplete = True
+    emit(
+        "ingestion.dataset.verified",
+        logging.INFO if verified_dataset_id else logging.WARNING,
+        verified=bool(verified_dataset_id),
+    )
+    stage("dataset_fetch")
+    emit("ingestion.dataset.fetch_started")
     raw_items = await _fetch_dataset_items(dataset_id, settings.apify_api_token)
 
     if not raw_items:
-        logger.info(
-            "── DATASET FETCHED  item_count=0  dataset_id=%s — nothing to process", dataset_id
-        )
+        emit("ingestion.dataset.fetched", received=len(raw_items))
         return {
             "dataset_id": dataset_id,
             "received": 0,
@@ -356,10 +436,11 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
             "published": 0,
         }
 
-    logger.info("── DATASET FETCHED  item_count=%d  dataset_id=%s", len(raw_items), dataset_id)
+    emit("ingestion.dataset.fetched", received=len(raw_items))
 
     # ── Step 7: Normalize items into canonical RawJob records ─────────────────
-    logger.info("── NORMALIZATION START  items=%d", len(raw_items))
+    stage("normalization")
+    emit("ingestion.normalization.started", received=len(raw_items))
     batch = normalize_batch(raw_items)
     jobs = batch.jobs
     normalized_count = batch.normalized
@@ -367,15 +448,15 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
     skipped = batch.rejected
     apply_url_fallback_count = batch.apply_url_fallback
 
-    logger.info(
-        "── NORMALIZATION COMPLETE  received=%d  valid=%d  skipped=%d  apply_url_fallback=%d"
-        "  unique=%d  in_batch_duplicates=%d",
-        len(raw_items),
-        normalized_count,
-        skipped,
-        apply_url_fallback_count,
-        len(jobs),
-        in_batch_duplicates,
+    emit(
+        "ingestion.normalization.completed",
+        logging.WARNING if skipped else logging.INFO,
+        received=len(raw_items),
+        normalized=normalized_count,
+        rejected=skipped,
+        unique=len(jobs),
+        in_batch_duplicates=in_batch_duplicates,
+        apply_url_fallback=apply_url_fallback_count,
     )
 
     if not jobs:
@@ -394,16 +475,12 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
 
     # ── Step 8: Batch insert with deduplication ────────────────────────────────
 
-    logger.info("── BIGQUERY PERSIST START  jobs_to_insert=%d", len(jobs))
+    stage("bigquery")
+    emit("ingestion.bigquery.started", unique=len(jobs))
     repo = RawJobRepository()
     try:
         inserted_ids: list[str] = await repo.batch_insert_jobs(jobs)
     except Exception as exc:  # noqa: BLE001
-        logger.error(
-            "BigQuery batch insert failed: dataset_id=%s error=%s",
-            dataset_id,
-            exc,
-        )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="BigQuery insert failed; see service logs",
@@ -411,10 +488,11 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
 
     inserted_count = len(inserted_ids)
     duplicates_count = len(jobs) - inserted_count
-    logger.info(
-        "── BIGQUERY PERSIST COMPLETE  novel_inserted=%d  duplicates_skipped=%d",
-        inserted_count,
-        duplicates_count,
+    emit(
+        "ingestion.bigquery.completed",
+        inserted=inserted_count,
+        unique=len(jobs),
+        existing_duplicates=duplicates_count,
     )
 
     # ── Step 8b: Recover saved-but-unembedded jobs from this batch on retry ─────
@@ -423,6 +501,9 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
     # recover them so that an Apify webhook retry automatically republishes them.
     jobs_to_publish = list(inserted_ids)
     recovered_retry_ids: list[str] = []
+    recovery_unconfirmed = False
+    stage("recovery")
+    emit("ingestion.recovery.started")
     if duplicates_count > 0:
         all_batch_ids = [j.job_id for j in jobs]
         existing_batch_ids = [jid for jid in all_batch_ids if jid not in set(inserted_ids)]
@@ -430,50 +511,50 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
             try:
                 unembedded_existing = await repo.get_unembedded_job_ids(job_ids=existing_batch_ids)
                 if unembedded_existing:
-                    logger.info(
-                        "── RECOVERY: Found %d saved-but-unembedded job(s) in retried batch: %s",
-                        len(unembedded_existing),
-                        unembedded_existing,
-                    )
                     recovered_retry_ids = unembedded_existing
                     for jid in recovered_retry_ids:
                         if jid not in jobs_to_publish:
                             jobs_to_publish.append(jid)
             except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "Failed to query unembedded existing jobs during batch recovery: %s",
-                    exc,
+                recovery_unconfirmed = True
+                state = context()
+                if state:
+                    state.incomplete = True
+                emit(
+                    "ingestion.recovery.failed",
+                    logging.WARNING,
+                    error_category="recovery_unconfirmed",
+                    **error_fields(exc),
                 )
 
+    emit(
+        "ingestion.recovery.completed",
+        logging.WARNING if recovery_unconfirmed else logging.INFO,
+        recovered=len(recovered_retry_ids),
+        outcome="unconfirmed" if recovery_unconfirmed else "success",
+    )
     # ── Step 9: Publish jobs_to_publish to Pub/Sub ────────────────────────────
 
     published_count = 0
     publish_failures = 0
     if jobs_to_publish:
-        logger.info("── PUBSUB PUBLISH START  job_ids_to_publish=%d", len(jobs_to_publish))
+        stage("pubsub")
+        emit("ingestion.pubsub.started")
         published_count, publish_failures = await _publish_job_ids(
             jobs_to_publish,
             project_id=settings.gcp_project_id,
             topic=settings.pubsub_embedding_topic,
         )
-        logger.info(
-            "── PUBSUB PUBLISH COMPLETE  published=%d  failures=%d",
-            published_count,
-            publish_failures,
+        emit(
+            "ingestion.pubsub.completed",
+            logging.WARNING if publish_failures else logging.INFO,
+            published=published_count,
+            publish_failures=publish_failures,
+            outcome=("unconfirmed" if not published_count else "partial")
+            if publish_failures
+            else "success",
+            subscriber_processing="not_observed",
         )
-
-    logger.info(
-        "── APIFY WEBHOOK COMPLETE  dataset_id=%s  received=%d  normalized=%d"
-        "  apply_url_fallback=%d  inserted=%d  published=%d  publish_failures=%d  recovered=%d",
-        dataset_id,
-        len(raw_items),
-        normalized_count,
-        apply_url_fallback_count,
-        inserted_count,
-        published_count,
-        publish_failures,
-        len(recovered_retry_ids),
-    )
 
     return {
         "dataset_id": dataset_id,
@@ -523,7 +604,7 @@ async def reconcile_unpublished_jobs(
     settings = get_settings()
     active_repo = repo or RawJobRepository()
 
-    logger.info("── RECONCILIATION START  limit=%d  min_age_seconds=%d", limit, min_age_seconds)
+    emit("ingestion.recovery.started")
     unembedded_ids = await active_repo.get_unembedded_job_ids(
         job_ids=None,
         limit=limit,
@@ -531,14 +612,10 @@ async def reconcile_unpublished_jobs(
     )
 
     if not unembedded_ids:
-        logger.info("── RECONCILIATION COMPLETE  No unembedded jobs found")
+        emit("ingestion.recovery.completed", recovered=0, published=0, publish_failures=0)
         return {"reconciled": 0, "published": 0, "publish_failures": 0, "job_ids": []}
 
-    logger.info(
-        "── RECONCILIATION DISCOVERED  count=%d  job_ids=%s",
-        len(unembedded_ids),
-        unembedded_ids,
-    )
+    emit("ingestion.recovery.discovered", recovered=len(unembedded_ids))
 
     published_count, publish_failures = await _publish_job_ids(
         unembedded_ids,
@@ -546,11 +623,12 @@ async def reconcile_unpublished_jobs(
         topic=settings.pubsub_embedding_topic,
     )
 
-    logger.info(
-        "── RECONCILIATION COMPLETE  reconciled=%d  published=%d  publish_failures=%d",
-        len(unembedded_ids),
-        published_count,
-        publish_failures,
+    emit(
+        "ingestion.recovery.completed",
+        logging.WARNING if publish_failures else logging.INFO,
+        recovered=len(unembedded_ids),
+        published=published_count,
+        publish_failures=publish_failures,
     )
 
     return {
@@ -597,14 +675,16 @@ async def _verify_actor_run(
             async with httpx.AsyncClient(timeout=_RUN_VERIFY_TIMEOUT_S) as http_client:
                 response = await http_client.get(url, headers=headers)
     except httpx.TimeoutException as exc:
-        logger.error("Apify Actor Run API timed out: actor_run_id=%s", actor_run_id)
+        emit("ingestion.apify.request_failed", logging.DEBUG, error_category="upstream_timeout")
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
             detail="Apify Actor Run API request timed out",
         ) from exc
     except httpx.RequestError as exc:
-        logger.error(
-            "Apify Actor Run API request error: actor_run_id=%s error=%s", actor_run_id, exc
+        emit(
+            "ingestion.apify.request_failed",
+            logging.DEBUG,
+            error_category="upstream_request_failed",
         )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -612,17 +692,21 @@ async def _verify_actor_run(
         ) from exc
 
     if response.status_code == 404:
-        logger.error("Apify actor run not found: actor_run_id=%s", actor_run_id)
+        emit(
+            "ingestion.apify.request_failed",
+            logging.DEBUG,
+            error_category="upstream_request_failed",
+        )
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Apify actor run '{actor_run_id}' not found",
         )
 
     if not response.is_success:
-        logger.error(
-            "Apify Actor Run API non-2xx response: actor_run_id=%s status=%d",
-            actor_run_id,
-            response.status_code,
+        emit(
+            "ingestion.apify.request_failed",
+            logging.DEBUG,
+            error_category="upstream_request_failed",
         )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -632,7 +716,9 @@ async def _verify_actor_run(
     try:
         data = response.json()
     except Exception as exc:  # noqa: BLE001
-        logger.error("Apify Actor Run API returned malformed JSON: %s", exc)
+        emit(
+            "ingestion.apify.request_failed", logging.DEBUG, error_category="invalid_upstream_json"
+        )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Apify Actor Run API returned non-JSON response",
@@ -687,13 +773,17 @@ async def _fetch_dataset_items(
             async with httpx.AsyncClient(timeout=_DATASET_FETCH_TIMEOUT_S) as http_client:
                 response = await http_client.get(url, headers=headers, params=params)
     except httpx.TimeoutException as exc:
-        logger.error("Apify Dataset API timed out: dataset_id=%s", dataset_id)
+        emit("ingestion.apify.request_failed", logging.DEBUG, error_category="upstream_timeout")
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
             detail=f"Apify Dataset API request timed out after {_DATASET_FETCH_TIMEOUT_S}s",
         ) from exc
     except httpx.RequestError as exc:
-        logger.error("Apify Dataset API request error: dataset_id=%s error=%s", dataset_id, exc)
+        emit(
+            "ingestion.apify.request_failed",
+            logging.DEBUG,
+            error_category="upstream_request_failed",
+        )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Could not reach Apify Dataset API",
@@ -701,10 +791,10 @@ async def _fetch_dataset_items(
 
     if response.status_code == 401:
         # Do NOT log the token — log only that authentication failed.
-        logger.error(
-            "Apify Dataset API authentication failed (401): dataset_id=%s | "
-            "Check that APIFY_API_TOKEN is valid.",
-            dataset_id,
+        emit(
+            "ingestion.apify.request_failed",
+            logging.DEBUG,
+            error_category="upstream_authentication",
         )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -712,17 +802,21 @@ async def _fetch_dataset_items(
         )
 
     if response.status_code == 404:
-        logger.error("Apify dataset not found: dataset_id=%s", dataset_id)
+        emit(
+            "ingestion.apify.request_failed",
+            logging.DEBUG,
+            error_category="upstream_request_failed",
+        )
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Apify dataset '{dataset_id}' not found",
         )
 
     if not response.is_success:
-        logger.error(
-            "Apify Dataset API non-2xx response: dataset_id=%s status=%d",
-            dataset_id,
-            response.status_code,
+        emit(
+            "ingestion.apify.request_failed",
+            logging.DEBUG,
+            error_category="upstream_request_failed",
         )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -732,10 +826,8 @@ async def _fetch_dataset_items(
     try:
         data = response.json()
     except Exception as exc:  # noqa: BLE001
-        logger.error(
-            "Apify Dataset API returned malformed JSON: dataset_id=%s error=%s",
-            dataset_id,
-            exc,
+        emit(
+            "ingestion.apify.request_failed", logging.DEBUG, error_category="invalid_upstream_json"
         )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -750,11 +842,7 @@ async def _fetch_dataset_items(
         if isinstance(items, list):
             return cast(list[dict[str, Any]], items)
 
-    logger.error(
-        "Unexpected Apify Dataset API response shape: dataset_id=%s type=%s",
-        dataset_id,
-        type(data).__name__,
-    )
+    emit("ingestion.apify.request_failed", logging.DEBUG, error_category="invalid_upstream_shape")
     raise HTTPException(
         status_code=status.HTTP_502_BAD_GATEWAY,
         detail="Apify Dataset API returned unexpected response structure",
@@ -804,17 +892,17 @@ async def _publish_job_ids(
             return future.result(timeout=_PUBSUB_PUBLISH_TIMEOUT_S)
 
         try:
-            message_id: str = await loop.run_in_executor(None, _do_publish)
-            logger.debug("Published job_id=%s pubsub_message_id=%s", job_id, message_id)
+            await loop.run_in_executor(None, _do_publish)
+
             published += 1
         except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "Pub/Sub publish failed: job_id=%s topic=%s error_type=%s error=%s",
-                job_id,
-                topic_path,
-                type(exc).__name__,
-                exc,
-            )
+            if failures == 0:
+                emit(
+                    "ingestion.pubsub.publish_unconfirmed",
+                    logging.WARNING,
+                    error_category="publication_unconfirmed",
+                    **error_fields(exc),
+                )
             failures += 1
 
     return published, failures

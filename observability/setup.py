@@ -70,7 +70,7 @@ def setup_observability() -> None:
     if "langfuse_otel" not in litellm.failure_callback:
         litellm.failure_callback.append("langfuse_otel")
 
-    logger.info("Observability initialised (LangFuse host=%s)", settings.langfuse_host)
+    logger.info("Observability initialised")
 
 
 def flush_observability() -> None:
@@ -83,8 +83,8 @@ def flush_observability() -> None:
     try:
         get_langfuse().flush()
         logger.info("LangFuse flush complete")
-    except Exception:  # noqa: BLE001
-        logger.warning("LangFuse flush failed — some traces may be lost", exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("LangFuse flush failed (error_type=%s)", type(exc).__name__)
 
 
 @lru_cache(maxsize=1)

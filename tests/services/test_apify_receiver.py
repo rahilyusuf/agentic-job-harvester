@@ -1,4 +1,4 @@
-﻿"""tests/services/test_apify_receiver.py — Integration and stage flow tests for apify_receiver."""
+"""tests/services/test_apify_receiver.py — Integration and stage flow tests for apify_receiver."""
 
 from __future__ import annotations
 
@@ -165,7 +165,7 @@ async def test_receiver_tracks_apply_url_fallback_and_logs(
         ),
         patch("services.apify_receiver.RawJobRepository") as mock_repo_cls,
         patch("services.apify_receiver._publish_job_ids", new=AsyncMock(return_value=(5, 0))),
-        caplog.at_level(logging.INFO, logger="services.apify_receiver"),
+        caplog.at_level(logging.INFO, logger="ingestion.events"),
     ):
         mock_repo = mock_repo_cls.return_value
         mock_repo.batch_insert_jobs = AsyncMock(return_value=["id1", "id2", "id3", "id4", "id5"])
@@ -183,25 +183,27 @@ async def test_receiver_tracks_apply_url_fallback_and_logs(
     assert response["inserted"] == 5
     assert response["published"] == 5
 
-    # 2. Assert stage log flow
-    log_text = "\n".join(record.message for record in caplog.records)
-    assert "── APIFY WEBHOOK START" in log_text
-    assert "── WEBHOOK PARSED" in log_text
-    assert "── FETCHING DATASET  dataset_id=dataset-xyz" in log_text
-    assert "── DATASET FETCHED  item_count=6  dataset_id=dataset-xyz" in log_text
-    assert "── NORMALIZATION START  items=6" in log_text
-    assert (
-        "── NORMALIZATION COMPLETE  received=6  valid=5  skipped=1  apply_url_fallback=3"
-        in log_text
+    # 2. Assert semantic stage flow and counters, independent of console formatting.
+    events = [record.event_fields for record in caplog.records if hasattr(record, "event_fields")]
+    names = [event["event"] for event in events]
+    milestones = [
+        "ingestion.webhook.received",
+        "ingestion.actor.verified",
+        "ingestion.dataset.fetched",
+        "ingestion.normalization.completed",
+        "ingestion.bigquery.completed",
+        "ingestion.recovery.completed",
+        "ingestion.pubsub.completed",
+        "ingestion.completed",
+    ]
+    assert [names.index(name) for name in milestones] == sorted(
+        names.index(name) for name in milestones
     )
-    assert "── BIGQUERY PERSIST START  jobs_to_insert=5" in log_text
-    assert "── BIGQUERY PERSIST COMPLETE  novel_inserted=5  duplicates_skipped=0" in log_text
-    assert "── PUBSUB PUBLISH START  job_ids_to_publish=5" in log_text
-    assert "── PUBSUB PUBLISH COMPLETE  published=5  failures=0" in log_text
-    assert (
-        "── APIFY WEBHOOK COMPLETE  dataset_id=dataset-xyz  received=6  normalized=5  apply_url_fallback=3"
-        in log_text
-    )
+    final = events[-1]
+    assert final["received"] == 6 and final["normalized"] == 5
+    assert final["rejected"] == 1 and final["apply_url_fallback"] == 3
+    assert final["unique"] == 5 and final["in_batch_duplicates"] == 0
+    assert len({event["request_id"] for event in events}) == 1
 
 
 @pytest.mark.unit

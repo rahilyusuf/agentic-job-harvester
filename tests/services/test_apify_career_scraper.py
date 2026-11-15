@@ -113,12 +113,12 @@ def test_both_urls_empty_skips_item(base_item: dict[str, Any], caplog: pytest.Lo
     item["jobUrl"] = ""
     item["applyUrl"] = ""
 
-    with caplog.at_level(logging.WARNING, logger=apify_career_scraper.__name__):
+    with caplog.at_level(logging.DEBUG, logger="ingestion.events"):
         job = normalize(item)
 
     assert job is None
     assert any(
-        "Skipping item with missing jobUrl and applyUrl" in record.message
+        getattr(record, "event_fields", {}).get("reason") == "missing_or_invalid_url"
         for record in caplog.records
     )
 
