@@ -344,37 +344,66 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
         logger.info(
             "── DATASET FETCHED  item_count=0  dataset_id=%s — nothing to process", dataset_id
         )
-        return {"dataset_id": dataset_id, "received": 0, "inserted": 0, "published": 0}
+        return {
+            "dataset_id": dataset_id,
+            "received": 0,
+            "normalized": 0,
+            "rejected": 0,
+            "unique": 0,
+            "in_batch_duplicates": 0,
+            "inserted": 0,
+            "published": 0,
+        }
 
     logger.info("── DATASET FETCHED  item_count=%d  dataset_id=%s", len(raw_items), dataset_id)
 
     # ── Step 7: Normalize items into canonical RawJob records ─────────────────
     logger.info("── NORMALIZATION START  items=%d", len(raw_items))
     jobs: list[RawJob] = []
+    seen_job_ids: set[str] = set()
+    normalized_count = 0
+    in_batch_duplicates = 0
     skipped = 0
     apply_url_fallback_count = 0
     for item in raw_items:
-        _, used_fallback = apify_career_scraper.resolve_job_url(item)
-        normalized = apify_career_scraper.normalize(item)
+        try:
+            _, used_fallback = apify_career_scraper.resolve_job_url(item)
+            normalized = apify_career_scraper.normalize(item)
+        except (TypeError, ValueError) as exc:
+            logger.warning("Skipping malformed dataset item: %s", type(exc).__name__)
+            skipped += 1
+            continue
         if normalized is not None:
-            jobs.append(normalized)
+            normalized_count += 1
             if used_fallback:
                 apply_url_fallback_count += 1
+            if normalized.job_id in seen_job_ids:
+                in_batch_duplicates += 1
+                continue
+            seen_job_ids.add(normalized.job_id)
+            jobs.append(normalized)
         else:
             skipped += 1
 
     logger.info(
-        "── NORMALIZATION COMPLETE  received=%d  valid=%d  skipped=%d  apply_url_fallback=%d",
+        "── NORMALIZATION COMPLETE  received=%d  valid=%d  skipped=%d  apply_url_fallback=%d"
+        "  unique=%d  in_batch_duplicates=%d",
         len(raw_items),
-        len(jobs),
+        normalized_count,
         skipped,
         apply_url_fallback_count,
+        len(jobs),
+        in_batch_duplicates,
     )
 
     if not jobs:
         return {
             "dataset_id": dataset_id,
             "received": len(raw_items),
+            "normalized": normalized_count,
+            "rejected": skipped,
+            "unique": len(jobs),
+            "in_batch_duplicates": in_batch_duplicates,
             "inserted": 0,
             "published": 0,
             "apply_url_fallback": apply_url_fallback_count,
@@ -456,7 +485,7 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
         "  apply_url_fallback=%d  inserted=%d  published=%d  publish_failures=%d  recovered=%d",
         dataset_id,
         len(raw_items),
-        len(jobs),
+        normalized_count,
         apply_url_fallback_count,
         inserted_count,
         published_count,
@@ -468,7 +497,10 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
         "dataset_id": dataset_id,
         "actor_run_id": actor_run_id,
         "received": len(raw_items),
-        "normalized": len(jobs),
+        "normalized": normalized_count,
+        "rejected": skipped,
+        "unique": len(jobs),
+        "in_batch_duplicates": in_batch_duplicates,
         "apply_url_fallback": apply_url_fallback_count,
         "inserted": inserted_count,
         "published": published_count,

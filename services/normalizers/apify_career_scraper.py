@@ -46,7 +46,17 @@ _SOURCE_LABEL = "apify-company-career-scraper"
 _MIN_DESCRIPTION_LEN = 50
 
 
-def resolve_job_url(item: dict[str, Any]) -> tuple[str, bool]:
+def _text_field(item: dict[str, Any], field: str) -> str:
+    """Read nullable source text without coercing malformed values into job data."""
+    value = item.get(field)
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise TypeError(f"{field} must be a string or null")
+    return value
+
+
+def resolve_job_url(item: object) -> tuple[str, bool]:
     """Resolve a URL for a job posting from scraper output.
 
     Precedence:
@@ -59,23 +69,40 @@ def resolve_job_url(item: dict[str, Any]) -> tuple[str, bool]:
             - url: Stripped jobUrl or applyUrl, or "" if neither is present.
             - used_fallback: True if jobUrl was missing/blank and applyUrl was used.
     """
-    job_url = (item.get("jobUrl") or "").strip()
-    if job_url:
-        return job_url, False
-    apply_url = (item.get("applyUrl") or "").strip()
-    if apply_url:
-        return apply_url, True
+    if not isinstance(item, dict):
+        return "", False
+    try:
+        job_url = _text_field(item, "jobUrl").strip()
+        if job_url:
+            return job_url, False
+        apply_url = _text_field(item, "applyUrl").strip()
+        if apply_url:
+            return apply_url, True
+    except TypeError:
+        return "", False
     return "", False
 
 
-def normalize(item: dict[str, Any]) -> RawJob | None:
+def normalize(item: object) -> RawJob | None:
     """Map one company-career-page-scraper dataset item to a canonical RawJob.
 
     Returns:
         A validated RawJob, or None if the item is malformed/unrepresentable.
 
-    Never raises — validation failures are logged as warnings and skipped.
+    Malformed record shapes, field types and validation failures are skipped.
     """
+    if not isinstance(item, dict):
+        logger.warning("Skipping malformed item: expected an object, got %s", type(item).__name__)
+        return None
+    try:
+        return _normalize_item(item)
+    except (TypeError, ValueError) as exc:
+        logger.warning("Skipping malformed item: %s", type(exc).__name__)
+        return None
+
+
+def _normalize_item(item: dict[str, Any]) -> RawJob | None:
+    """Normalize a source object inside the public per-record validation boundary."""
     job_url, used_fallback = resolve_job_url(item)
     if not job_url:
         logger.warning(
@@ -95,11 +122,11 @@ def normalize(item: dict[str, Any]) -> RawJob | None:
     # The scraper provides its own jobId (e.g. "workable-<uuid>") which is
     # already an ATS-native stable ID — pass it as ats_id so compute_job_id
     # uses it directly instead of falling back to MD5(url).
-    ats_id: str | None = item.get("jobId", "").strip() or None
+    ats_id: str | None = _text_field(item, "jobId").strip() or None
     job_id = compute_job_id(job_url, ats_id=ats_id)
 
     # Prefer plain-text description for embedding; fall back to HTML as last resort.
-    description: str = (item.get("descriptionText", "") or item.get("descriptionHtml", "")).strip()
+    description = (_text_field(item, "descriptionText") or _text_field(item, "descriptionHtml")).strip()
 
     if len(description) < _MIN_DESCRIPTION_LEN:
         logger.warning(
@@ -116,16 +143,16 @@ def normalize(item: dict[str, Any]) -> RawJob | None:
     # salaryMin/salaryMax/salaryCurrency/salaryPeriod are source-specific structured
     # fields not represented in RawJob — preserved here as context for the follow-up
     # architectural gap (raw_source_data JSON column).
-    salary_raw: str | None = item.get("salary", "").strip() or None
+    salary_raw: str | None = _text_field(item, "salary").strip() or None
 
     # ats_platform is the ATS system name as reported by the scraper
     # (e.g. "workable", "lever", "greenhouse").
-    ats_platform: str | None = item.get("source", "").strip() or None
+    ats_platform: str | None = _text_field(item, "source").strip() or None
 
-    raw_location = (item.get("location") or "").strip() or None
-    raw_title = (item.get("title") or "").strip()
-    raw_company = (item.get("companyName") or item.get("companyDomain") or "").strip()
-    raw_employment_type = (item.get("employmentType") or "").strip() or None
+    raw_location = _text_field(item, "location").strip() or None
+    raw_title = _text_field(item, "title").strip()
+    raw_company = (_text_field(item, "companyName") or _text_field(item, "companyDomain")).strip()
+    raw_employment_type = _text_field(item, "employmentType").strip() or None
 
     # Sanitize untrusted scraped text (Option A: Layer 1 length cap + Layer 2 pattern strip & tag escape)
     # for safe storage in BigQuery, clean vector embeddings, and regex prefiltering.
@@ -186,16 +213,16 @@ def normalize(item: dict[str, Any]) -> RawJob | None:
         return None
 
 
-def _parse_iso_dt(value: str | None) -> datetime | None:
+def _parse_iso_dt(value: object) -> datetime | None:
     """Parse an ISO 8601 datetime string (possibly with trailing Z) to a
     timezone-aware UTC datetime.  Returns None on any parse failure.
     """
-    if not value:
+    if not isinstance(value, str) or not value:
         return None
     try:
         # Replace trailing Z with +00:00 for fromisoformat compatibility.
         normalized = value.strip().replace("Z", "+00:00")
         return datetime.fromisoformat(normalized).astimezone(timezone.utc)
-    except (ValueError, TypeError):
+    except (ValueError, OverflowError, OSError):
         logger.debug("Could not parse datetime value: %r", value)
         return None
