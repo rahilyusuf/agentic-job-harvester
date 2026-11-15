@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from google.cloud import bigquery
 from google.cloud.exceptions import NotFound
 
-from config.settings import get_settings
+from config.settings import Settings, get_settings
 from schemas.job_models import JobStatus, RawJob
 from utils.retry import async_retry
 from utils.time import format_bq_timestamp, get_dedup_window_start
@@ -31,8 +31,11 @@ class RawJobRepository:
         self,
         bq_client: bigquery.Client | None = None,
         dataset: str | None = None,
+        *,
+        settings: Settings | None = None,
     ) -> None:
-        settings = get_settings()
+        settings = settings if settings is not None else get_settings()
+        self._dedup_window_days = settings.dedup_window_days
         self._client = bq_client or bigquery.Client(
             project=settings.gcp_project_id,
             location=settings.bq_location,
@@ -62,12 +65,19 @@ class RawJobRepository:
     @async_retry(max_attempts=3, base_delay=1.0)
     async def batch_insert_jobs(self, jobs: list[RawJob]) -> list[str]:
         """Batch insert jobs. Returns list of newly inserted job_ids (empty if all duplicates)."""
+        return await self._batch_insert_jobs(jobs, retry_insert=True)
+
+    async def batch_insert_jobs_once(self, jobs: list[RawJob]) -> list[str]:
+        """One attempt, with SDK insertion retries disabled; errors may mean partial writes."""
+        return await self._batch_insert_jobs(jobs, retry_insert=False)
+
+    async def _batch_insert_jobs(self, jobs: list[RawJob], *, retry_insert: bool) -> list[str]:
         if not jobs:
             return []
 
         # Check all job_ids in one BQ query using array parameter
         ids = [j.job_id for j in jobs]
-        window_start = format_bq_timestamp(get_dedup_window_start())
+        window_start = format_bq_timestamp(get_dedup_window_start(self._dedup_window_days))
         query = f"""
             SELECT job_id FROM `{self._table}`
             WHERE job_id IN UNNEST(@ids)
@@ -86,7 +96,8 @@ class RawJobRepository:
             return []
 
         rows = [j.model_dump(mode="json") for j in novel_jobs]
-        errors = self._client.insert_rows_json(self._table, rows)
+        insert_options = {} if retry_insert else {"retry": None}
+        errors = self._client.insert_rows_json(self._table, rows, **insert_options)
         if errors:
             raise RuntimeError(f"BQ batch insert errors: {errors}")
 

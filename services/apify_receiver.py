@@ -49,6 +49,7 @@ from config.settings import get_settings
 from observability.setup import flush_observability, setup_observability
 from repositories.raw_jobs_repo import RawJobRepository
 from services.normalizers import apify_career_scraper
+from services.normalizers.batch import normalize_batch
 from schemas.job_models import RawJob
 
 logger = logging.getLogger(__name__)
@@ -359,31 +360,12 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
 
     # ── Step 7: Normalize items into canonical RawJob records ─────────────────
     logger.info("── NORMALIZATION START  items=%d", len(raw_items))
-    jobs: list[RawJob] = []
-    seen_job_ids: set[str] = set()
-    normalized_count = 0
-    in_batch_duplicates = 0
-    skipped = 0
-    apply_url_fallback_count = 0
-    for item in raw_items:
-        try:
-            _, used_fallback = apify_career_scraper.resolve_job_url(item)
-            normalized = apify_career_scraper.normalize(item)
-        except (TypeError, ValueError) as exc:
-            logger.warning("Skipping malformed dataset item: %s", type(exc).__name__)
-            skipped += 1
-            continue
-        if normalized is not None:
-            normalized_count += 1
-            if used_fallback:
-                apply_url_fallback_count += 1
-            if normalized.job_id in seen_job_ids:
-                in_batch_duplicates += 1
-                continue
-            seen_job_ids.add(normalized.job_id)
-            jobs.append(normalized)
-        else:
-            skipped += 1
+    batch = normalize_batch(raw_items)
+    jobs = batch.jobs
+    normalized_count = batch.normalized
+    in_batch_duplicates = batch.in_batch_duplicates
+    skipped = batch.rejected
+    apply_url_fallback_count = batch.apply_url_fallback
 
     logger.info(
         "── NORMALIZATION COMPLETE  received=%d  valid=%d  skipped=%d  apply_url_fallback=%d"
