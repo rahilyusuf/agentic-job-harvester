@@ -1,0 +1,75 @@
+# Remediation backlog — unresolved findings and decisions
+
+Informational review record as of 2026-11-14. This file does not override requirements,
+waive controls, approve migrations, or authorize implementation. Phase 1 changes only
+documentation; none of the findings below is closed by rewriting instructions.
+
+[Guardrails](guardrails.md) own requirements; [architecture](../../ARCHITECTURE.md)
+records source evidence; [conventions](conventions.md) own boundaries. Priorities below
+are implementation planning recommendations, not findings about deployed exposure.
+Live IAM, schemas, data, SDK versions and proxy traffic remain Unverified.
+
+## Immediate security work — Planned, not implemented in Phase 1
+
+| ID / priority | Exact affected files | Evidence and intended remediation | Dependencies / regression risk |
+|---|---|---|---|
+| S-1 / P0 | `services/apify_receiver.py`, `config/settings.py` | Reconciliation routes lack route authentication and bounded operator inputs. Protect them without changing established webhook credential support, provenance checks or recovery. | Operator/scheduler identity; medium risk of blocking legitimate recovery callers. |
+| S-2 / P0 | `services/telegram_webhook.py`, `services/user_profile_service.py`, `orchestration/hitl_controller.py`, `config/settings.py` | Submitted user/callback/profile identities are trusted without established application authorization/replay controls. Authenticate, map identity, authorize ownership, deduplicate updates; resolve trace/job data from trusted durable state. Replace long callback payloads with bounded opaque references. | Identity/callback contract and migration; high HITL/client compatibility risk. |
+| S-3 / P0 | `repositories/raw_jobs_repo.py`, `repositories/embeddings_repo.py`, `repositories/evaluated_repo.py`, `repositories/actions_repo.py`, `repositories/profiles_repo.py`, `tools/history_tools.py` | SQL interpolates external values. Parameterize values and validate configured identifiers; retain existing array parameters. | Mocked adapter tests; medium parameter typing/query compatibility risk. |
+| S-4 / P0 | `tools/search_tools.py` | Arbitrary destinations/redirects and post-download truncation allow SSRF/resource abuse. Validate public destinations, including DNS/redirect hops, block metadata/internal ranges, stream with byte/time bounds. | Fetch policy; medium loss of access to some research sites. |
+| S-5 / P0 | `observability/setup.py`, `gateway/client.py`, `gateway/litellm_config.yaml`, `agents/scorer_agent.py`, `agents/skillgap_agent.py` | Decorated methods and automatic callbacks can capture resume summaries, prompts, exceptions or embedding content. Establish privacy-safe capture/redaction and intentional callback ownership. No verified production leak is asserted. | SDK/proxy compatibility and G-2 capture contract; medium reduction in debugging detail. |
+| S-6 / P0 | `tools/cache_tools.py`, `agents/research_agent.py`, `schemas/research_models.py` | Company-keyed research includes application-history context. Separate public facts from private user context; validate cache schema/expiry/identity and avoid normalized-name collisions. | Public/private schema decision; medium cache invalidation and research behavior risk. |
+| S-7 / P0 | `orchestration/hitl_controller.py`, `orchestration/pipeline.py`, `repositories/interfaces.py`, `repositories/evaluated_repo.py`, `schemas/job_models.py` | Analyze publication and direct Tier 2 calls lack G-5 eligibility enforcement; unconditional status writes are not optimistic locking. Enforce consent, ownership, score and veto, then acquire a conditional claim and check affected rows. Define retry/replay behavior. | S-2, lifecycle and storage concurrency design; high duplicate-work/recovery risk. |
+| S-8 / P0 | `orchestration/input_sanitizer.py`, `tools/search_tools.py`, `agents/router_agent.py`, `agents/scorer_agent.py`, `agents/skeptic_agent.py`, `agents/research_agent.py`, `agents/company_agent.py`, `agents/redflag_agent.py`, `agents/skillgap_agent.py` | Ingestion sanitizes fields, but prompt builders do not use the shared formatter and search/fetch/research text bypasses the complete boundary. Wire shared capped isolation and system framing at prompt entry, including cache/legacy data. | G-10 and adversarial fixtures; medium prompt/scoring quality risk. |
+| S-9 / P1 | `agents/base.py`, `orchestration/pipeline.py`, `schemas/job_models.py`, `sql/job_evaluated.sql`, `repositories/evaluated_repo.py`, `orchestration/hitl_controller.py`, `observability/setup.py` | UUID metadata does not prove SDK trace linkage; evaluation lacks durable scoring trace ID. Establish supported correlation, persist it, resolve it on delayed actions, and separate Analyze from acceptance labels. Ensure lifecycle flushing and telemetry failures do not corrupt durable actions. | S-2/S-5, additive migration and SDK contract; medium/high historical compatibility risk. |
+| S-10 / P1 | `config/settings.py`, `tools/e2b_tools.py` | Timeout settings permit up to 120 seconds despite G-6; run-code deadline/cleanup is not established by passing a sandbox lifetime. Enforce execution cap and cleanup, test timeout/cancellation/output/error semantics. | Supported E2B version; medium challenge/runtime compatibility risk. |
+| S-11 / P1 | `config/settings.py`, `services/apify_receiver.py`, `services/embedding_worker.py`, `services/telegram_webhook.py`, `services/user_profile_service.py`, `infra/cloudbuild.yaml` | Secret fetching can return empty values; deployment auth/IAM and producer configuration are Unverified. Review fail-closed requirements, body/dataset bounds and authenticated Pub/Sub callers; preserve existing production Apify enforcement. | Deployment evidence and secret/identity policy; high operational risk if hardened without caller coordination. |
+
+## Data integrity and contract work — Planned
+
+| ID / priority | Exact affected files | Evidence and intended remediation | Dependencies / regression risk |
+|---|---|---|---|
+| I-1 / P1 | `repositories/evaluated_repo.py`, `repositories/profiles_repo.py` | Named upserts append streaming rows. Evaluation MERGE is constructed but not executed; insertion errors need propagation. Implement actual idempotent writes/deterministic reads and assess existing duplicates before migration. | S-3, live-data assessment; high write/migration risk. |
+| I-2 / P1 | `repositories/raw_jobs_repo.py`, `services/apify_receiver.py`, `services/embedding_worker.py` | Read-before-insert does not guarantee same-batch/concurrent dedupe; partial inserts and retry semantics need confirmed-write accounting. Recover stale queued work after hard crashes. Preserve webhook retry publication and reconciliation. | Concurrency/idempotency design, existing service regressions; high working-pipeline risk. |
+| I-3 / P1 | `orchestration/pipeline.py`, `repositories/embeddings_repo.py`, `repositories/interfaces.py`, `schemas/job_models.py` | Raw global SCORED/SKIPPED status prevents later users retrieving the same embedding. Separate global readiness from per-user decisions with a compatible data transition. | Lifecycle decision and migration; high retrieval/rescoring risk. |
+| I-4 / P1 | `agents/skeptic_agent.py`, `orchestration/pipeline.py`, `schemas/scoring_models.py` | A model-requested round two below the threshold is not always cleared; veto still persists an evaluation as a normal scored result. Make deterministic consensus/veto behavior agree with G-5 while retaining diagnostics. | Typed result/consumer semantics; medium debate behavior risk. |
+| I-5 / P1 | `repositories/interfaces.py`, `repositories/raw_jobs_repo.py`, `services/apify_receiver.py`, `services/tier1_matcher_runner.py`, `agents/router_agent.py`, `agents/reflection_agent.py`, `schemas/reflection_models.py`, `tools/history_tools.py`, `orchestration/output_validator.py` | Raw insertion protocol says int but concrete returns ID list; recovery methods are absent. Rules are dictionary lists and scorer does not receive router-loaded rules. Some tools use raw dictionaries/direct SDKs; post-construction mutations need consistent validation. Align typed contracts and move SQL/config access behind explicit boundaries. | S-3 and schema/interface design; medium/high call-site compatibility risk. |
+| I-6 / P1 | `repositories/actions_repo.py`, `agents/reflection_agent.py`, `repositories/embeddings_repo.py`, `repositories/profiles_repo.py` | Review DISTINCT/ORDER BY feedback SQL, event replay, finite/dimension-compatible vectors and centroid math. Reflection uses job IDs and empty passed summaries rather than complete evidence. | Reliable actions, data contracts, feedback evidence; medium ranking risk. |
+| I-7 / P2 | `repositories/raw_jobs_repo.py`, `repositories/embeddings_repo.py`, `repositories/evaluated_repo.py`, `repositories/actions_repo.py`, `repositories/profiles_repo.py`, `tools/history_tools.py`, `orchestration/hitl_controller.py` | Sync BigQuery calls and blocking publish future waits occur in async paths. Offload bounded SDK calls behind adapters without changing business semantics. | Adapter/concurrency tests; medium timeout/retry risk. |
+| I-8 / P2 | `retrieval/regex_prefilter.py`, `services/tier1_matcher_runner.py`, `schemas/job_models.py` | YOE checks require optional structured extractions that the runner does not supply. Design a deterministic low-cost YOE gate without adding raw-stream LLM scoring. | Retrieval policy and G-5 budget; medium false-positive/negative risk. |
+
+## Architecture decisions — outstanding, no migration authorized
+
+| ID | Exact affected files | Decision / dependencies | Regression risk |
+|---|---|---|---|
+| A-1 | `gateway/client.py`, `gateway/litellm_config.yaml`, `config/settings.py`, `ARCHITECTURE.md` | Decide how to close the direct Vertex embedding deviation from G-1. Proxy target remains required; any alternative requires explicit approval. Preserve model/provider, 768 dimensions, input/task semantics, data compatibility, privacy and region behavior. Verify chat proxy routing independently. | High if routing/vector semantics change; no silent provider switch or backfill. |
+| A-2 | `orchestration/pipeline.py`, `agents/base.py`, `agents/research_agent.py`, `requirements.txt`, `ARCHITECTURE.md` | Decide whether an ADK migration is justified. Historical intent/packages are not approval. Current Python orchestration remains the baseline. | High topology, model-call and schema enforcement risk. |
+| A-3 | `repositories/embeddings_repo.py`, `retrieval/vector_matcher.py`, `sql/job_embeddings.sql`, `ARCHITECTURE.md` | Evaluate indexed retrieval versus current exact ranking using measured recall, latency, cost and index readiness. | Medium/high candidate changes; no presumed index usage. |
+| A-4 | `orchestration/hitl_controller.py`, `orchestration/pipeline.py`, `repositories/interfaces.py`, `infra/cloudbuild.yaml`, `ARCHITECTURE.md` | Design a dedicated Tier 2 consumer, durable result storage, failure/retry/recovery lifecycle and injectable queue adapter. Canonical status enum/migration must accommodate current NULL/PENDING/IN_PROGRESS/COMPLETE/ERROR data. | High; requires S-2/S-7, storage design and separately approved new service/schema paths. |
+| A-5 | `requirements.txt`, `pyproject.toml`, `.agents/rules/stack.md`, `observability/setup.py`, `tools/e2b_tools.py` | Establish a reproducible tested dependency baseline. Check SDK APIs/callbacks and declared unused packages without upgrading/installing ADK to satisfy prose. | Medium container/SDK compatibility risk. |
+| A-6 | `ARCHITECTURE.md`, `services/tier1_matcher_runner.py`, `services/reflection_runner.py`, `agents/redflag_agent.py` | Decide completion criteria for generic n8n/UI integrations, low-confidence notifications, weekly learning evidence, and research heuristics such as jobs active over 60 days. These are intent/heuristics, not verified capabilities or guarantees of toxicity/ghost jobs. | Medium feature/quality risk; separate scopes and measurable acceptance criteria required. |
+
+## Constraint preservation and corrected contradictions
+
+| Historical instruction | Canonical disposition |
+|---|---|
+| Proxy-only model access, including embeddings | G-1 retains the target; direct gateway Vertex call is A-1, not a waiver. |
+| Pydantic agent I/O versus dictionary session registry | G-3 retains validation; architecture documents actual models, scalars, serialized boundaries and dataclass orchestration results. Fictional ADK session/output keys removed. |
+| Never log/persist resume text | G-2 retained and extended to summaries, automatic telemetry and embedding capture. Source-of-resume assertions corrected. |
+| Async agents, no blocking I/O | Conventions retain the requirement; existing synchronous adapters are I-7. Pure prompt helper methods need not be async. |
+| Two debate rounds, five research operations, Skeptic veto | G-5 retained; I-4 and architecture disclose incomplete deterministic enforcement/accounting. Future LoopAgent must retain explicit max_iterations=2. |
+| Thirty-second sandbox, bounded stdout/stderr | G-6 retained; nonexistent constant/import and invalid example fields removed, S-10 records implementation mismatch. |
+| Trace every model call; delayed action correlation | G-9 retained; nonexistent method/API requirements replaced by actual public decorators and helpers. S-9 remains open. |
+| Firestore only for config/research cache; BigQuery job data | G-8 retained; S-6 adds public/private cache separation. |
+| Explicit Analyze and Tier 1 eligibility | G-5 retained using actual agreed_score; notification threshold remains distinct. |
+| Sanitize external content before prompts | G-10 retained; ingestion alone is insufficient. Duplicate skill removed, canonical directory copy maintained. |
+| No concrete repositories in agents/orchestration/services | G-4 retains business-logic isolation; services explicitly compose adapters. This narrows the earlier blanket services ban without permitting concrete adapters in agents/orchestration/retrieval. |
+| Gateway imported only by agent base | G-1 still centralizes all model access; conventions permit embedding producers to use its helper. No provider SDK calls outside gateway. |
+| Universal job-ID dedupe/state chain for all writes | G-8 preserves integrity with domain-specific keys; architecture records actual owners/values and I-3 captures lifecycle redesign. No migration performed. |
+| Score every user action as acceptance | G-9 preserves all action events and apply/pass feedback, but treats Analyze separately. Current 0.5 behavior is explicitly unresolved S-9; this semantic correction needs implementation review. |
+
+No security, privacy, cost or isolation requirement is intentionally removed. The
+composition, serialization and action-label corrections above are explicit changes of
+interpretation for reviewer attention. Phase 1 does not claim missing enforcement was
+implemented. Source comments outside the documentation scope may still use legacy ADK,
+state or API terminology; they do not override these canonical documents.

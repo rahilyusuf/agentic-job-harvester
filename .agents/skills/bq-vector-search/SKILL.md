@@ -1,93 +1,49 @@
 ---
 name: bq-vector-search
-description: Guidance on BigQuery native vector search and index operations for candidate job matching. Covers ML.DISTANCE cosine similarity, 768-dimensional text-embedding-004 vectors, IVF index configuration, and retrieval pipeline integration.
+description: Implement or review BigQuery candidate retrieval, embedding storage/query contracts, cosine ranking, or vector-index evaluation. Use for retrieval and repository changes; model-call routing belongs to the gateway skill.
 ---
 
-# BigQuery Native Vector Search Patterns
+# BigQuery retrieval and vectors
 
-This skill guides the implementation, optimization, and querying of vector search in `agentic-job-harvester-v2`.
+## Policy and evidence
 
----
+Read [guardrails](../../rules/guardrails.md) G-4/G-5/G-8 and
+[architecture](../../../ARCHITECTURE.md#implemented-tier-1-python-orchestration).
+They own isolation, candidate budgets, keys and write safety. This skill owns query
+and retrieval procedures, not another model/provider or state policy.
 
-## 1. Vector Pipeline Overview
+**Implemented:** [VectorMatcher](../../../retrieval/vector_matcher.py) loads the user's
+active centroid and calls `IEmbeddingRepository.vector_search()`. The
+[concrete adapter](../../../repositories/embeddings_repo.py) orders
+`1 - ML.DISTANCE(embedding, query_vector, 'COSINE')` and filters raw jobs by readiness.
+It does not invoke `VECTOR_SEARCH`. [Index DDL](../../../sql/job_embeddings.sql) is
+intent; live index readiness, query index usage and latency are **Unverified**.
 
-Candidate job retrieval follows a two-stage filter before any agent LLM calls:
-1. **Step A — Vector Search:** BigQuery Native Vector Search (`ML.DISTANCE`) retrieves top 50 roles with $<15\text{ms}$ query latency.
-2. **Step B — Regex Pre-filter:** Zero-cost filter removes candidates with $>5\text{ YOE}$ or excluded executive titles (Director, VP, Head of), narrowing the pool to $\approx 15$ roles.
-3. **Intelligence Layer:** LLM scoring runs *only* over the surviving $\le 15$ roles.
+## Working procedure
 
-```
-Incoming Webhook (Apify)
-  └─► Pre-compute 768-dim embedding (text-embedding-004)
-        └─► Persist to BigQuery job_embeddings (IVF Cosine Index)
-              └─► Tier 1 Step A: ML.DISTANCE cosine search (Top 50)
-                    └─► Tier 1 Step B: Regex pre-filter (~15 roles)
-                          └─► Tier 1 Multi-Agent Scoring (LLM)
-```
+- Read repository protocols and actual SQL before selecting an optimization. Preserve
+  metric semantics, ordering, job/score association and compatible vector dimensions.
+  Delegate embedding generation/routing to [litellm-instructor](../litellm-instructor/SKILL.md).
+- Use interface injection for business callers and parameterized values in adapters.
+  Validate dimensions and finite values at boundaries; a raw list type alone does not
+  establish compatibility. Schema versus SQL disagreements need explicit resolution.
+- Retain the precomputed job vectors and the G-5 retrieval/prefilter budget. The current
+  prefilter caps passed results, but YOE checks require optional extraction data absent
+  from the current runner. Do not claim regex description parsing already exists or add
+  raw-stream LLM extraction to make that claim true.
+- Keep global ingestion readiness distinct from per-user evaluation decisions when
+  designing a migration; current global status coupling is I-3 in the
+  [backlog](../../rules/remediation-backlog.md), not a safe template.
+- Reflection blends base resume and accepted-job centroid vectors. Read
+  [reflection_agent.py](../../../agents/reflection_agent.py) for the gradual alpha
+  schedule; its ceiling is not the initial default weight. Never mix model/task spaces
+  just because vectors have equal length.
 
----
+## Validation and planned optimization
 
-## 2. Embedding Specification
-
-- **Model:** `text-embedding-004` (768 dimensions).
-- **Endpoint:** Always routed through `gateway/client.py::generate_embedding()`, calling LiteLLM proxy `/embeddings`.
-- **Input Text Structure:**
-  ```python
-  embedding_input = f"{title} {company} {location} {description[:2000]}"
-  ```
-- **Storage:** BigQuery table `job_embeddings` (`embedding ARRAY<FLOAT64>`).
-
----
-
-## 3. BigQuery Vector Index & SQL Syntax
-
-### Index Creation DDL
-The embeddings table is indexed using an Inverted File (IVF) index optimized for cosine distance:
-```sql
-CREATE VECTOR INDEX IF NOT EXISTS job_embeddings_ivf_idx
-ON `${PROJECT_ID}.${DATASET_ID}.job_embeddings`(embedding)
-OPTIONS(
-    distance_type = 'COSINE',
-    index_type = 'IVF'
-);
-```
-
-### Vector Search Query Pattern
-Vector search computes cosine similarity using `1 - ML.DISTANCE`:
-```sql
-SELECT
-    j.job_id,
-    1 - ML.DISTANCE(u.e_active_user, e.embedding, 'COSINE') AS similarity_score
-FROM
-    `${PROJECT_ID}.${DATASET_ID}.job_embeddings` AS e
-CROSS JOIN
-    `${PROJECT_ID}.${DATASET_ID}.user_profiles` AS u
-JOIN
-    `${PROJECT_ID}.${DATASET_ID}.raw_job_postings` AS j
-    ON e.job_id = j.job_id
-WHERE
-    u.user_id = @user_id
-    AND j.status = 'EMBEDDING_DONE'
-ORDER BY
-    similarity_score DESC
-LIMIT @top_k;
-```
-
----
-
-## 4. User Active Centroid Drift Formula
-
-The candidate's active search vector $e_{\text{active}}$ adapts weekly via the `ReflectionAgent` using confirmed feedback:
-$$e_{\text{active, new}} = (1 - \alpha) \cdot e_{\text{resume}} + \alpha \cdot e_{\text{accepted\_centroid}}$$
-- $e_{\text{resume}}$: Static baseline embedding of candidate resume.
-- $e_{\text{accepted\_centroid}}$: Mean embedding of roles marked `✅ Apply` or accepted by the user over the last 30 days.
-- $\alpha$: Centroid drift rate (default: 0.35).
-
----
-
-## 5. Architectural Guardrails
-
-1. **Pre-computation Discipline:** Embeddings are generated once upon ingestion by `embedding_worker.py`. Never compute embeddings dynamically in agent scoring loops.
-2. **Interface Isolation:** Callers depend only on `repositories.interfaces.IEmbeddingRepository.vector_search()`, never concrete BigQuery client classes directly.
-3. **90-Day Deduplication Window:** Prior to inserting new raw job postings and generating embeddings, deduplicate jobs by ATS UUID or MD5 URL hash over a rolling 90-day window.
-
+Use mocked adapters for empty/missing profiles, malformed vectors, exact ranking,
+limits, filtering and job/score identity. Existing tests live in
+[tests/retrieval](../../../tests/retrieval). An indexed-search proposal needs authorized
+representative benchmarks for recall, latency, cost and index availability (A-3).
+Do not run DDL, backfills or cloud benchmarks merely to validate documentation, and
+do not advertise the historical latency/cost estimates as measurements.

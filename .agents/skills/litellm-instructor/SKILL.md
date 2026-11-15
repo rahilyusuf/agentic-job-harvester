@@ -1,77 +1,51 @@
 ---
 name: litellm-instructor
-description: Guidance on routing all LLM chat completions and embeddings through the LiteLLM Proxy using Instructor for Pydantic v2 schema enforcement. Covers model aliases (fast-flash, deep-pro, router-flash), LangFuse trace metadata injection, and zero-direct-API rules.
+description: Modify structured LLM calls, Instructor validation, gateway aliases, proxy integration, or embedding access through the existing gateway. Use for model-access code; excludes switching providers or treating direct embeddings as an approved permanent design.
 ---
 
-# LiteLLM Proxy + Instructor Structured Output Patterns
+# Gateway and structured output
 
-This skill guides all LLM invocations, model alias mapping, schema enforcement, and embedding requests across `agentic-job-harvester-v2`.
+[Guardrails](../../rules/guardrails.md) G-1/G-2/G-3 own routing, privacy and validation.
+[Stack guidance](../../rules/stack.md#model-configuration) references current configuration;
+[architecture](../../../ARCHITECTURE.md#model-access) distinguishes actual implementation
+from the proxy-only target. Do not maintain another provider/alias table here.
 
----
+## Structured chat — Implemented interface
 
-## 1. Core Principle: Zero Direct LLM Calls (Guardrail G-1)
+Read [gateway/client.py](../../../gateway/client.py) and [agents/base.py](../../../agents/base.py).
+`get_instructor_client()` returns `GatewayClient`, whose `create(model, response_model,
+messages, *, trace_id=None, max_retries=3, **kwargs)` delegates to Instructor's wrapped
+LiteLLM completion. Agents use `_call_llm()` through their shared base. The wrapper adds
+trace metadata; using its exposed `.chat` property directly bypasses that wrapper logic.
 
-Every Gemini Flash, Gemini Pro, and text embedding call MUST route through the LiteLLM Proxy via `gateway/client.py`:
-- ❌ **Forbidden:** `genai.Client()`, `google.generativeai`, `vertexai.generative_models.GenerativeModel`.
-- ❌ **Forbidden:** Direct unproxied calls to Google APIs from agents.
-- ✅ **Required:** `from gateway.client import get_instructor_client, generate_embedding`.
+Set `MODEL_ALIAS` to a registered chat alias in
+[gateway/litellm_config.yaml](../../../gateway/litellm_config.yaml), not a provider model
+string. Preserve the existing router/scoring/reflection allocation. Treat retries as
+cost-bearing requests, and validate final Pydantic output before use/persistence.
+Do not parse arbitrary returned JSON or add direct SDK chat calls as a fallback.
 
----
+## Embeddings — current deviation, decision outstanding
 
-## 2. Gateway Client (`gateway/client.py`)
+`generate_embedding(text)` currently calls direct Vertex prediction via an executor,
+using `text-embedding-004` and a 768-value result check. There is no configured proxy
+embedding alias. G-1's proxy endpoint requirement remains the target; A-1 is unresolved,
+not a permanent exception. Do not route raw embeddings through Instructor's chat API.
+Keep all callers using the existing helper; do not copy the provider adapter elsewhere.
 
-`gateway/client.py` is the single authorized gateway module in the codebase:
+For any separately authorized routing change, preserve model/provider and task/input
+compatibility, dimensions, region behavior, privacy, retries and stored-vector semantics.
+Read worker/profile callers: job input formatting is not the profile input contract.
+Do not switch providers or regenerate the corpus merely to align with documentation.
 
-```python
-from gateway.client import get_instructor_client, generate_embedding
+## Verification and responsibilities
 
-# Structured chat completions with Instructor
-client = get_instructor_client()
-result = await client.chat.completions.create(
-    model="fast-flash",
-    response_model=MyOutputSchema,
-    messages=[
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-    ],
-    metadata={"trace_id": langfuse_trace_id},
-)
+Verify traffic reaches the intended proxy with a mock/local endpoint and explicit
+request assertions; LiteLLM global settings alone do not prove proxy traversal.
+Inspect alias mappings, fallback and rate configuration independently of actual
+runtime enforcement. Use [langfuse-tracing](../langfuse-tracing/SKILL.md) for privacy-safe
+instrumentation; do not log prompts to debug gateway routing.
 
-# Pre-computed 768-dim embeddings
-vector = await generate_embedding("Senior AI Engineer DeepMind London ...")
-```
-
----
-
-## 3. Standard Model Aliases
-
-Always use the registered LiteLLM aliases instead of full provider model strings:
-
-| Alias | Target Model | Max Tokens / RPM | Component Usage |
-|---|---|---|---|
-| `fast-flash` | `vertex_ai/gemini-2.5-flash` | 4096 / standard | `ScorerAgent`, `SkepticAgent`, `CompanyVerificationAgent`, `RedFlagDetectorAgent`, `SkillGapAgent` |
-| `router-flash` | `vertex_ai/gemini-2.5-flash` | 512 / standard | `JobIntakeRouter` (minimal context, fast routing) |
-| `deep-pro` | `vertex_ai/gemini-2.5-pro` | 8192 / 10 RPM cap | `ReflectionAgent` (weekly offline synthesis) |
-| `text-embedding-004` | `vertex_ai/text-embedding-004` | 768 dims | `gateway/client.py::generate_embedding()` |
-
----
-
-## 4. Schema Enforcement (Guardrail G-3)
-
-- All agent outputs must be strictly typed Pydantic v2 schemas located in `schemas/`.
-- Unvalidated dictionary returns from any agent are strictly forbidden.
-- `instructor.from_litellm()` automatically inspects the `response_model`, passes JSON schema parameters to the model, and retries validation failures up to `max_retries` with the validation error context injected into the conversation.
-
----
-
-## 5. Telemetry & Observability Injection (Guardrail G-9)
-
-Every LLM completion call must inject LangFuse correlation metadata:
-```python
-metadata = {
-    "trace_id": trace_id,
-    "user_id": user_id,
-    "session_id": session_id,
-}
-```
-LiteLLM is pre-configured with LangFuse callbacks (`litellm.success_callback = ["langfuse_otel"]`), ensuring token counts, latency, and prompt traces are automatically recorded and linked to user actions.
+Use mocked client/provider adapters to check model selection, response validation,
+retry limits, metadata propagation, malformed outputs and embedding dimensions/failure
+behavior. Instructor retries and provider fallbacks must remain bounded and observable
+without sensitive capture. Live model/cloud calls require separate authorization.
