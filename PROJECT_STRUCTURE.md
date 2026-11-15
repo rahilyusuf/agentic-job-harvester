@@ -1,131 +1,88 @@
-# PROJECT_STRUCTURE.md — Agentic Job Harvester
+# Repository structure and ownership
 
-Corrected against `ARCHITECTURE.md` (LLD v3.1). Additions vs. the original draft are
-marked `[NEW]`. This file is the folder-level source of truth — if you add/remove/
-rename a top-level module, update this file in the same change.
+This is the file-location inventory, not a claim that every listed component is
+complete or deployed. [ARCHITECTURE.md](ARCHITECTURE.md) owns behavior/status contracts;
+[conventions.md](.agents/rules/conventions.md) owns dependency boundaries;
+[AGENTS.md](AGENTS.md) owns instruction precedence. Update this inventory when modules
+are added, removed, or renamed.
 
-```
-agentic-job-harvester/
-├── agents/                      ← ADK agent classes (one file per agent)
-│   ├── base.py                  ← BaseIntelligenceAgent (Instructor + LiteLLM + LangFuse wrapper)
-│   ├── router_agent.py          ← JobIntakeRouter (Dynamic Routing)
-│   ├── scorer_agent.py          ← ScorerAgent (Tier 1 Debate)
-│   ├── skeptic_agent.py         ← SkepticAgent (Tier 1 Debate & Veto)
-│   ├── research_agent.py        ← CompanyResearchAgent (ReAct + Tools)
-│   ├── company_agent.py         ← CompanyVerificationAgent (Due Diligence)
-│   ├── redflag_agent.py         ← RedFlagDetectorAgent (Ghost/Toxicity Scan)
-│   ├── skillgap_agent.py        ← SkillGapAgent (Gap Analysis + E2B Sandbox)
-│   └── reflection_agent.py      ← ReflectionAgent (Weekly Active Learning)
-│
-├── retrieval/                   ← [NEW] Tier 1 candidate retrieval — belongs here,
-│   │                               not in repositories/, because it's business logic
-│   │                               (which roles qualify), not raw data access.
-│   ├── vector_matcher.py        ← Step A: BQ VECTOR_SEARCH / ML.DISTANCE cosine, top 50
-│   └── regex_prefilter.py       ← Step B: $0 gate — YOE>5yrs, excluded titles, top ~15
-│
-├── orchestration/                ← ADK graph wiring & non-agent logic
-│   ├── pipeline.py               ← SequentialAgent, LoopAgent, and ParallelAgent graphs
-│   ├── hitl_controller.py        ← Telegram pause/resume HITL state machine
-│   └── output_validator.py       ← Pydantic Output Validation Gateway
-│
-├── schemas/                      ← Pydantic v2 data contracts (Single Source of Truth)
-│   ├── job_models.py             ← RawJob, JobStructuredExtraction, EvaluatedJob
-│   ├── routing_models.py         ← RouterDecision
-│   ├── scoring_models.py         ← ScorerOutput, SkepticOutput
-│   ├── research_models.py        ← CompanyResearch, CompanyProfile
-│   ├── diligence_models.py       ← RedFlagAnalysis, SkillGapReport, CodeChallenge
-│   ├── reflection_models.py      ← PreferenceRules
-│   └── profile_models.py         ← [NEW] UserProfile, ResumeMetadata (for user_profiles)
-│
-├── tools/                        ← Tool definitions for ReAct and Sandboxing
-│   ├── search_tools.py           ← google_search, fetch_url
-│   ├── cache_tools.py            ← lookup_research_cache, write_research_cache
-│   ├── history_tools.py          ← check_application_history
-│   └── e2b_tools.py              ← execute_in_sandbox
-│
-├── repositories/                 ← BigQuery data access layer
-│   ├── interfaces.py             ← [NEW] Protocols/ABCs — agents & orchestration depend
-│   │                                on THESE, never on concrete classes below. This is
-│   │                                the actual dependency-inversion mechanism, and what
-│   │                                lets tests/ mock repos without touching real BQ.
-│   ├── raw_jobs_repo.py          ← [NEW] raw_job_postings read/write
-│   ├── embeddings_repo.py        ← [NEW] job_embeddings read/write
-│   ├── evaluated_repo.py         ← [NEW] job_evaluated read/write
-│   ├── actions_repo.py           ← [NEW] job_user_actions read/write
-│   └── profiles_repo.py          ← [NEW] user_profiles read/write
-│
-├── sql/                          ← [NEW] BigQuery DDL — executable source of truth
-│   │                                for table shape, not just ARCHITECTURE.md prose.
-│   ├── raw_job_postings.sql
-│   ├── job_embeddings.sql
-│   ├── job_evaluated.sql
-│   ├── job_user_actions.sql
-│   └── user_profiles.sql
-│
-├── gateway/                      ← LiteLLM proxy client factory & model aliases
-│   ├── litellm_config.yaml       ← Model routing, fallbacks (Pro → Flash), rate caps
-│   └── client.py                 ← AsyncInstructor client + embeddings helper
-│                                    (embeddings must route through here too — see
-│                                    AGENTS.md constraint #1 fix)
-│
-├── observability/                ← LangFuse OpenTelemetry setup & trace scoring
-│
-├── services/                     ← Cloud Run microservices (each = one deployable)
-│   ├── apify_receiver.py         ← Ingestion webhook consumer
-│   ├── embedding_worker.py       ← [NEW] Pre-computes embeddings (text-embedding-004)
-│   ├── user_profile_service.py   ← [NEW] Streamlit-facing profile write path
-│   ├── tier1_matcher_runner.py   ← [NEW] Daily Cloud Scheduler entry point
-│   ├── telegram_webhook.py       ← HITL inline-button callback receiver
-│   └── reflection_runner.py      ← Weekly Cloud Scheduler entry point
-│
-├── utils/                        ← [NEW, scoped narrowly] Generic, domain-free helpers
-│   │                                ONLY. If it encodes a business rule, it does not
-│   │                                belong here — see retrieval/ or repositories/.
-│   ├── ids.py                    ← job_id = ATS UUID or MD5(job_url)
-│   ├── retry.py                  ← generic retry/backoff decorator
-│   └── time.py                   ← timestamp/window helpers (e.g. the 90-day dedupe window)
-│
-├── config/                       ← Environment settings, constants, Secret Manager access
-│   └── settings.py               ← Central Settings object & sandbox timeouts
-│
-├── tests/                        ← [NEW] Mirrors source tree
-│   ├── agents/                   ← Agent logic w/ mocked LiteLLM (fixture-based)
-│   ├── orchestration/            ← LoopAgent consensus-threshold regression tests
-│   ├── retrieval/
-│   └── repositories/             ← Against interfaces.py mocks, not live BigQuery
-│
-├── scripts/                      ← [NEW] One-off ops: embedding backfill, seed
-│                                    Firestore dynamic_preference_rules, local bootstrap
-│
-├── infra/                        ← [NEW] Dockerfile per Cloud Run service, deploy config
-│   ├── apify_receiver.Dockerfile
-│   ├── embedding_worker.Dockerfile
-│   ├── ... (one per services/*.py)
-│   └── cloudbuild.yaml           ← or terraform/, if you go that route
-│
-├── .agents/                      ← AI coding agent context (rules, skills, workflows)
-├── AGENTS.md
-├── ARCHITECTURE.md
-├── PROJECT_STRUCTURE.md          ← this file
-├── pyproject.toml                ← [NEW] pytest/ruff/mypy config, once tests/ exists
-└── requirements.txt
+## Application modules — Implemented source
+
+| Directory | Files and responsibility |
+|---|---|
+| `agents/` | `base.py`: abstract Python base; `router_agent.py`, `scorer_agent.py`, `skeptic_agent.py`: Tier 1; `research_agent.py`, `company_agent.py`, `redflag_agent.py`, `skillgap_agent.py`: research/diligence; `reflection_agent.py`: feedback synthesis. No implemented ADK runtime classes. |
+| `orchestration/` | `pipeline.py`: explicit Python Tier1/Tier2 calls and dataclass results; `hitl_controller.py`: action coordination; `input_sanitizer.py`: normalization/prompt-boundary helpers; `output_validator.py`: model revalidation. |
+| `retrieval/` | `vector_matcher.py`: interface-based candidate retrieval; `regex_prefilter.py`: title gate, optional extraction checks, candidate budget. |
+| `schemas/` | `job_models.py`, `routing_models.py`, `scoring_models.py`, `research_models.py`, `diligence_models.py`, `reflection_models.py`, `profile_models.py`: Pydantic contracts. |
+| `repositories/` | `interfaces.py`: protocols; `raw_jobs_repo.py`, `embeddings_repo.py`, `evaluated_repo.py`, `actions_repo.py`, `profiles_repo.py`: concrete BigQuery adapters. Named upserts/protocols have unresolved integrity gaps. |
+| `gateway/` | `client.py`: Instructor chat wrapper and direct Vertex embedding adapter; `litellm_config.yaml`: configured chat aliases, fallbacks/callbacks/limits. Proxy embedding routing is not implemented. |
+| `observability/` | `setup.py`: Langfuse initialization, decorator re-export, flush, metadata and scoring helpers. Privacy/correlation enforcement remains incomplete. |
+| `tools/` | `search_tools.py`: Custom Search/page fetch; `cache_tools.py`: Firestore research cache; `history_tools.py`: current BigQuery history query; `e2b_tools.py`: sandbox execution. |
+| `config/` | `settings.py`: environment/default settings and secret resolution. |
+| `utils/` | `ids.py`, `retry.py`, `time.py`: generic identity, backoff and timestamp helpers. |
+
+## Entry points and persistence
+
+| Exact path | Implemented entry point / intended trigger |
+|---|---|
+| [services/apify_receiver.py](services/apify_receiver.py) | FastAPI `/webhook/apify`, `/health`, `/reconcile`, `/jobs/reconcile`; actor-event ingestion and publication recovery |
+| [services/normalizers/apify_career_scraper.py](services/normalizers/apify_career_scraper.py) | Actor-specific item normalization, URL fallback and ingestion sanitization |
+| [services/embedding_worker.py](services/embedding_worker.py) | FastAPI Pub/Sub push `/`, `/health`; consumes job embedding messages |
+| [services/user_profile_service.py](services/user_profile_service.py) | FastAPI profile write endpoint and health route |
+| [services/tier1_matcher_runner.py](services/tier1_matcher_runner.py) | Async `main()` and per-user runner; daily scheduling intent is Unverified |
+| [services/telegram_webhook.py](services/telegram_webhook.py) | FastAPI Telegram callback and health routes |
+| [services/reflection_runner.py](services/reflection_runner.py) | Async `main()`; weekly scheduling intent is Unverified |
+| [sql/raw_job_postings.sql](sql/raw_job_postings.sql) | Intended raw job table DDL |
+| [sql/job_embeddings.sql](sql/job_embeddings.sql) | Intended embeddings table/vector index DDL |
+| [sql/job_evaluated.sql](sql/job_evaluated.sql) | Intended per-user evaluation table DDL |
+| [sql/job_user_actions.sql](sql/job_user_actions.sql) | Intended action table DDL |
+| [sql/user_profiles.sql](sql/user_profiles.sql) | Intended user profile table DDL |
+
+A Python service file is not evidence of an independently deployed Cloud Run service.
+A dedicated Tier 2 consumer and a Streamlit application are Planned, not present here.
+Generic n8n support is also Planned.
+
+## Infrastructure, operations and tests
+
+- `infra/` contains `apify_receiver.Dockerfile`, `embedding_worker.Dockerfile`,
+  `tier1_matcher_runner.Dockerfile`, `telegram_webhook.Dockerfile`,
+  `reflection_runner.Dockerfile`, and `cloudbuild.yaml`. There is no Dockerfile for
+  every service module. Cloud Build contains active deploy steps; live deployment is Unverified.
+- `scripts/` contains `local_bootstrap.py`, `backfill_embeddings.py`, and
+  `seed_preference_rules.py`. These may mutate external state; they are not documentation checks.
+- `tests/agents/`, `tests/orchestration/`, `tests/retrieval/`, `tests/repositories/`,
+  and `tests/services/` hold corresponding regression tests. Existing service tests
+  cover normalization, ingestion auth/provenance, publication failure/recovery and
+  worker retries. Test presence does not imply a passing run or deployed verification.
+- `requirements.txt` declares dependency ranges; `pyproject.toml` declares Python
+  compatibility, package discovery and development-tool settings. Neither is proof
+  of the installed environment.
+
+## Governance inventory
+
+```text
+AGENTS.md                           instruction hierarchy and policy ownership
+ARCHITECTURE.md                     implemented/planned/unverified design and contracts
+PROJECT_STRUCTURE.md                this inventory
+README.md                           project entry point
+.agents/
+  rules/
+    conventions.md                  layer and implementation conventions
+    guardrails.md                   canonical security/privacy/cost requirements
+    stack.md                        dependency and model configuration evidence
+    remediation-backlog.md          informational unresolved findings and decisions
+  skills/
+    pipeline-orchestration/SKILL.md  current Python pipeline procedures
+    bq-vector-search/SKILL.md        retrieval/vector/index procedures
+    e2b-sandboxing/SKILL.md          generated-code sandbox procedures
+    input-sanitization/SKILL.md      external-content trust boundaries
+    langfuse-tracing/SKILL.md        privacy-safe tracing/correlation procedures
+    litellm-instructor/SKILL.md      gateway/structured-output procedures
+  workflows/
+    add-agent.md                    adding an authorized Python agent
+    debug-score-debate.md           investigating debate behavior
 ```
 
-## Layering rule (the "single dependency" part)
-Dependencies only point inward, never sideways or outward:
-
-```
-services/  (frameworks — Cloud Run entry points)
-    ↓
-orchestration/, agents/  (application/use-case logic)
-    ↓
-retrieval/, tools/  (domain logic)
-    ↓
-repositories/interfaces.py  (abstractions — agents depend on THIS)
-    ↑ implements
-repositories/*_repo.py  (concrete BigQuery adapters)
-```
-
-`schemas/` sits underneath everything — pure data contracts, no behavior, no imports
-from `repositories/` or `gateway/`. Nothing above should import a concrete
-`repositories/*_repo.py` class directly; go through `interfaces.py`.
+The root duplicate sanitization skill and misleading ADK-named skill/workflow have
+been replaced in this documentation alignment. Skills own procedures, not another
+copy of policy, schema, model mapping, or lifecycle contracts.

@@ -1,77 +1,48 @@
 ---
 name: e2b-sandboxing
-description: Guidance on E2B code interpreter sandboxing with AsyncSandbox for SkillGapAgent coding challenges. Covers secure micro-VM execution, 30-second timeout constraints, stdout/stderr length truncation, and audit logging.
+description: Modify or validate generated Python challenge execution through the E2B sandbox tool, including deadlines, cleanup, bounded output, and typed results. Excludes running generated code locally or enabling Tier 2 automatically.
 ---
 
-# E2B Code Interpreter Sandboxing
+# E2B challenge execution
 
-This skill guides the implementation, execution, and security constraints for running LLM-generated code in isolated E2B micro-VM sandboxes.
+[Guardrails](../../rules/guardrails.md) G-6 own isolation, deadline and output limits;
+G-5 owns Tier 2 authorization. This skill owns sandbox integration, not eligibility
+or model selection. See [architecture](../../../ARCHITECTURE.md#tier-2-and-research)
+for Implemented/Planned/Unverified status.
 
----
+## Current integration — Implemented source
 
-## 1. Context & Purpose
+[SkillGapAgent](../../../agents/skillgap_agent.py) identifies gaps, generates challenges
+for blocking gaps and delegates to [tools/e2b_tools.py](../../../tools/e2b_tools.py).
+The tool imports `AsyncSandbox` from `e2b_code_interpreter`, uses a context manager,
+and returns [CodeChallenge](../../../schemas/diligence_models.py). Its fields are
+`skill`, `challenge_description`, `generated_code`, `sandbox_stdout`, `sandbox_stderr`,
+`execution_success`, `execution_time_ms` and `sandbox_id`; do not use old example fields
+such as `passed`, `python_code`, or `stdout` in this model.
 
-In **Tier 2 (DueDiligenceSuite)**, the `SkillGapAgent` analyzes missing technical skills:
-1. Distinguishes between **learnable gaps** (e.g., familiar with PyTorch, job asks for TensorFlow) and **blocking gaps** (e.g., missing distributed training or CUDA requirements).
-2. For blocking gaps, generates a targeted Python coding challenge with test assertions.
-3. **Executes the challenge in an E2B micro-VM** to verify syntax, execution, and test cases *before* presenting it to the user.
+`execute_in_sandbox(skill, challenge_description, python_code)` is the tool interface.
+The input argument name differs intentionally from the model's `generated_code` field.
+The current tool reads `settings.e2b_sandbox_timeout_seconds`; there is no standalone
+timeout constant. Settings allow values beyond G-6, an unresolved S-10 deviation.
 
----
+## Implementation procedure
 
-## 2. Security Guardrail G-6: Isolation Rules
+Read the actual tool, schema and supported SDK contract before changing lifecycle
+calls. The broad dependency range does not verify that a copied constructor/context
+manager example is supported. Keep the credential inside the adapter; generated code
+must not receive application secrets, resume text or cloud credentials.
 
-- **Zero Local Execution:** Never execute LLM-generated code locally via `exec()`, `eval()`, or local subprocesses (`subprocess.run`). All dynamic code MUST execute inside an E2B sandbox.
-- **Hard Timeout Limit:** Every sandbox execution must respect `SANDBOX_TIMEOUT_SECONDS = 30` (from `config/settings.py`).
-- **Output Length Limits:** Truncate stdout and stderr to prevent memory flooding:
-  - `_MAX_STDOUT_CHARS = 2000`
-  - `_MAX_STDERR_CHARS = 500`
-- **Audit Logging:** Record the `sandbox_id`, execution duration (`execution_time_ms`), and exit status in `schemas.diligence_models.CodeChallenge`.
+Distinguish sandbox lifetime, network request timeout and code execution deadline.
+Implement G-6's execution bound and cleanup for success, timeout, error and cancellation
+when that work is authorized. Truncating persisted output is not a memory limit on the
+SDK response; evaluate both. Preserve safe typed failure results without returning
+secret-bearing exception strings. Review current success detection, which treats stderr
+as failure; stderr output alone need not imply failed execution.
 
----
+## Validation
 
-## 3. Tool Implementation (`tools/e2b_tools.py`)
-
-Always use the standard `execute_in_sandbox()` tool function:
-
-```python
-from e2b_code_interpreter import AsyncSandbox
-from config.settings import get_settings
-from schemas.diligence_models import CodeChallenge
-
-async def execute_in_sandbox(
-    skill: str,
-    challenge_description: str,
-    python_code: str,
-) -> CodeChallenge:
-    settings = get_settings()
-    timeout = settings.e2b_sandbox_timeout_seconds  # 30 seconds
-
-    async with AsyncSandbox(api_key=settings.e2b_api_key) as sandbox:
-        execution = await sandbox.run_code(
-            python_code,
-            timeout=timeout,
-        )
-        stdout = (execution.text or "")[:_MAX_STDOUT_CHARS]
-        stderr = (execution.error.value if execution.error else "")[:_MAX_STDERR_CHARS]
-        passed = execution.error is None
-
-        return CodeChallenge(
-            skill=skill,
-            challenge_description=challenge_description,
-            python_code=python_code,
-            sandbox_id=sandbox.sandbox_id,
-            execution_time_ms=...,
-            passed=passed,
-            stdout=stdout,
-            stderr=stderr,
-        )
-```
-
----
-
-## 4. Lifecycle & Error Handling
-
-1. **Context Management:** Always use `async with AsyncSandbox(...)` or a robust `try...finally` block calling `await sandbox.kill()` to prevent orphaned micro-VMs.
-2. **Timeout Handling:** Catch `TimeoutError` from E2B gracefully, mark `passed=False`, and populate `stderr="Execution timed out after 30 seconds"`.
-3. **Syntax / Runtime Errors:** Failure in test assertions should not crash the agent; the failed execution details are captured in `CodeChallenge` so the agent can evaluate candidate readiness accurately.
-
+Mock sandbox creation/execution/cleanup and cover oversized output, assertions/runtime
+errors, creation failure, timeout, cancellation and schema validation. Validate exact
+SDK behavior in a separately authorized integration environment. Do not execute generated
+challenges locally as a shortcut, or call E2B during documentation checks. Failure cases
+must remain usable `CodeChallenge` results without violating field limits.

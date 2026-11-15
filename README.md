@@ -1,52 +1,43 @@
-# Agentic Job Harvester 🚀
+# Agentic Job Harvester
 
-> Multi-agent job evaluation platform built on **Google ADK**, **BigQuery Vector Search**, **LiteLLM**, **Langfuse**, and **E2B MicroVM Sandboxes**.
+Job intelligence for an early-career AI/ML engineer targeting Saudi Arabia and the UAE.
+Current source uses async Python orchestration, BigQuery, Pub/Sub, Instructor/LiteLLM,
+Langfuse and E2B. Google ADK integration is **Planned**, not the implemented runtime.
 
-## 🏗 Architecture Overview
+## Architecture status
 
-The system runs a 4-tier closed-loop pipeline:
+- **Implemented source:** authenticated/provenance-checked Apify event ingestion,
+  actor-specific normalization/sanitization, BigQuery writes, Pub/Sub publication
+  recovery/reconciliation, and an embedding worker.
+- **Implemented source:** cosine ranking using `ML.DISTANCE`, a bounded deterministic
+  prefilter, router/scorer/skeptic Python calls, and typed outputs. Declared IVF DDL
+  does not establish index usage by the current query.
+- **Partially implemented:** on-demand diligence with research followed by concurrent
+  verification, red-flag and skill-gap operations, E2B challenge execution, Telegram
+  actions, and reflection. Authorization, concurrency, persistence and privacy gaps
+  are recorded separately; a complete Tier 2 worker deployment is not established.
+- **Implemented routing deviation:** embeddings use direct Vertex prediction inside
+  the gateway. Proxy-controlled embedding routing remains the target; a permanent
+  routing decision has not been approved. Chat aliases come from gateway configuration.
+- **Unverified:** deployed services/schedules/IAM, SDK compatibility, proxy enforcement,
+  live schema/index readiness, and historical latency/cost estimates.
 
-1. **Ingestion & Pre-Computation:** Cloud Run services (`apify-receiver` & `job-embedding-worker`) digest webhooks, deduplicate against a 90-day window, and generate 768-dim vector embeddings (`text-embedding-004`).
-2. **Tier 1 Agentic Scoring:** 
-   - BigQuery Cosine Vector Search (`ML.DISTANCE`) + deterministic regex pre-filter ($0 cost).
-   - `JobIntakeRouter` (`SKIP` | `PROCESS` | `HIGH_PRIORITY`).
-   - `ScoreDebateLoop` (ADK `LoopAgent` running `ScorerAgent` vs. `SkepticAgent` consensus audit with final veto authority).
-3. **Tier 2 On-Demand Intelligence Swarm:**
-   - `CompanyResearchAgent` (ReAct pattern with Google Search and cache tools).
-   - `DueDiligenceSuite` (ADK `ParallelAgent` running verification, ghost job/toxicity scans, and skill gap detection).
-   - `SkillGapAgent` executes code challenges inside an isolated **E2B MicroVM Sandbox**.
-4. **HITL & Active Learning Flywheel:** Telegram inline actions (`Apply`, `Pass`) record user telemetry into BigQuery and tag Langfuse traces, driving weekly active learning updates to the user's preference centroid.
+## Repository guidance
 
-## 🛠 Tech Stack
+Start with [AGENTS.md](AGENTS.md) for instructions and policy ownership,
+[ARCHITECTURE.md](ARCHITECTURE.md) for evidence and current contracts, and
+[PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) for actual modules/entry points.
+[Security requirements](.agents/rules/guardrails.md) remain binding even where
+[the remediation backlog](.agents/rules/remediation-backlog.md) records missing enforcement.
 
-- **Orchestration:** Google ADK (`google-adk`)
-- **LLM Gateway:** LiteLLM Proxy (RPM token buckets, model fallbacks)
-- **Vector Engine & Storage:** BigQuery Native Vector Index + Firestore
-- **Code Sandboxing:** E2B (`e2b-code-interpreter`)
-- **Observability:** Langfuse (OpenTelemetry tracing & feedback scoring)
-- **Validation:** Instructor + Pydantic v2
+## Local setup guidance
 
-## 📁 Repository Blueprint
+[requirements.txt](requirements.txt) and [pyproject.toml](pyproject.toml) declare the
+runtime/development baseline; broad ranges are not a tested environment lockfile.
+[Stack guidance](.agents/rules/stack.md) explains configuration evidence and limitations.
+Do not use the former `adk web agents/` instructions for this Python implementation.
 
-Detailed folder hierarchy and dependency rules are defined in [`PROJECT_STRUCTURE.md`](./PROJECT_STRUCTURE.md) and [`ARCHITECTURE.md`](./ARCHITECTURE.md).
-
-## 🚦 Quickstart Setup
-
-```bash
-# 1. Clone repository
-git clone [https://github.com/](https://github.com/)<your-github-username>/agentic-job-harvester.git
-cd agentic-job-harvester
-
-# 2. Create virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
-
-# 3. Install Google ADK and core dependencies
-pip install --upgrade pip
-pip install google-adk instructor litellm langfuse e2b-code-interpreter
-
-# 4. Copy environment environment configuration
-cp .env.example .env
-
-# 5. Launch local ADK dev web server
-adk web agents/
+The local receiver entry point is `services.apify_receiver:app` (Uvicorn/FastAPI).
+Starting it can resolve secrets and contacting its ingestion endpoint can write to
+cloud services. Use an explicitly configured development environment for application
+work; a server launch, bootstrap script or Cloud Build run is not a documentation check.

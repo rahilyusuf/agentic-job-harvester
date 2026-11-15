@@ -1,50 +1,54 @@
-# Stack & Version Pins — agentic-job-harvester
+# Stack and configuration evidence
 
-## Runtime Versions
-- **Python**: 3.11+ (required for `asyncio.TaskGroup`, `tomllib`)
-- **google-adk**: `>=0.4.0,<0.5.0` — ADK SequentialAgent / LoopAgent / ParallelAgent / LlmAgent
-- **google-genai**: `>=1.11.0` — underlying GenAI SDK (do NOT call directly; route via gateway/)
-- **google-cloud-bigquery**: `>=3.25.0` — BQ client; use `query_and_wait` for sync, `create_job` async
-- **google-cloud-pubsub**: `>=2.20.0` — PublisherClient for `job-embedding-queue`
-- **google-cloud-firestore**: `>=2.16.0` — dynamic_preference_rules config cache + research cache
-- **google-cloud-secret-manager**: `>=2.20.0` — all secrets must be read via SecretManagerServiceClient
-- **google-cloud-aiplatform**: `>=1.70.0` — text-embedding-004 via `aiplatform.init` (embedding worker only)
-- **fastapi**: `>=0.111.0` — Cloud Run service entry points
-- **uvicorn**: `>=0.30.0` — ASGI server (with `--workers 1` per container)
-- **pydantic**: `>=2.7.0,<3.0.0` — all schemas; use `model_validator`, `field_validator`
-- **instructor**: `>=1.3.0` — structured outputs; always use `instructor.from_litellm()`
-- **litellm**: `>=1.40.0` — proxy client; configure via `gateway/litellm_config.yaml`
-- **e2b-code-interpreter**: `>=1.0.0` — `AsyncSandbox` for SkillGapAgent code challenges
-- **langfuse**: `>=2.35.0` — `@observe` decorator, `langfuse.score()` for HITL telemetry
-- **python-dotenv**: `>=1.0.1` — local `.env` loading in `config/settings.py`
+This file owns dependency/configuration guidance under [AGENTS.md](../../AGENTS.md).
+Security requirements are in [guardrails.md](guardrails.md), not redefined here.
 
-## Model Aliases (configured in gateway/litellm_config.yaml)
-| Alias | Resolves To | Use Case |
+## Runtime and dependencies
+
+**Implemented declarations:** [pyproject.toml](../../pyproject.toml) requires Python
+3.11+ and configures pytest, Ruff, mypy, and packaging. [requirements.txt](../../requirements.txt)
+declares runtime packages, mostly with lower bounds; it is not an exact lockfile.
+Use those manifests rather than copying a second set of version pins into instructions.
+
+The application uses FastAPI/httpx, Google Cloud BigQuery/Pub/Sub/Firestore/Secret
+Manager/AI Platform SDKs, Pydantic v2, Instructor, LiteLLM, Langfuse, NumPy, and E2B.
+Google ADK and Google GenAI packages are declared but do not establish runtime ADK use.
+ADK integration is **Planned** and requires a separate architecture decision.
+
+**Unverified:** installed/deployed versions, compatibility of broad package ranges,
+Langfuse callback/API behavior, E2B lifecycle API, and cloud SDK behavior under the
+deployed runtime. Comments naming an installed SDK version are not an environment
+inventory. Do not install/upgrade packages as part of documentation alignment.
+
+## Model configuration
+
+[gateway/litellm_config.yaml](../../gateway/litellm_config.yaml) owns configured chat
+aliases and provider mappings. Update this evidence snapshot when that file changes:
+
+| Alias | Configured provider model | Current use |
 |---|---|---|
-| `fast-flash` | `gemini/gemini-2.5-flash` | ScorerAgent, SkepticAgent, CompanyVerificationAgent, RedFlagDetectorAgent, SkillGapAgent |
-| `deep-pro` | `gemini/gemini-2.5-pro` | ReflectionAgent (weekly, cost-tolerant) |
-| `router-flash` | `gemini/gemini-2.5-flash` | JobIntakeRouter (cheapest viable model) |
+| `router-flash` | `gemini/gemini-2.5-flash` | Intake router |
+| `fast-flash` | `gemini/gemini-2.5-flash` | Scoring, skepticism, research, verification, red flags, skill gaps |
+| `deep-pro` | `gemini/gemini-2.5-pro` | Reflection |
 
-## LiteLLM Proxy Constraints
-- Base URL: `${LITELLM_PROXY_BASE_URL}` (env var, never hardcoded)
-- API key from Secret Manager: `litellm-proxy-api-key`
-- All calls must pass `metadata={"trace_id": langfuse_trace_id}` for correlation
+Use aliases at chat call sites. The configuration describes Gemini API routing, not
+`vertex_ai/` chat routing. It declares a Pro-to-Flash fallback, a Flash self-fallback,
+and global limits/budget; these do not prove effective enforcement or a dedicated
+10-RPM Pro cap. Actual client-to-proxy routing is **Unverified**.
 
-## Embedding Model
-- Model: `text-embedding-004` (768 dimensions)
-- Entry point: `gateway/client.py::generate_embedding()` — the ONLY place this is called
-- Input format: `f"{title} {company} {location} {description[:2000]}"`
+[gateway/client.py](../../gateway/client.py) owns the existing embedding implementation:
+`text-embedding-004`, 768 dimensions, direct Vertex prediction, executor-offloaded.
+There is no registered embedding alias in the proxy configuration. This is the unresolved
+G-1 deviation, not permission to add direct calls or a permanent routing decision.
 
-## Cloud Run Services
-| Service | Entry Point | Trigger | Min Instances |
-|---|---|---|---|
-| apify-receiver | `services/apify_receiver.py` | Pub/Sub push / HTTP | 0 |
-| embedding-worker | `services/embedding_worker.py` | Pub/Sub `job-embedding-queue` | 0 |
-| tier1-matcher | `services/tier1_matcher_runner.py` | Cloud Scheduler (daily) | 0 |
-| telegram-webhook | `services/telegram_webhook.py` | HTTP (Telegram Bot API) | 1 |
-| reflection-runner | `services/reflection_runner.py` | Cloud Scheduler (weekly) | 0 |
+## Configuration and deployability
 
-## BigQuery Dataset
-- Dataset ID: `${BQ_DATASET}` (env var; default `job_intelligence`)
-- Project: `${GCP_PROJECT_ID}`
-- Location: `${BQ_LOCATION}` (default `US`)
+[config/settings.py](../../config/settings.py) is the settings/secret boundary.
+Defaults include dataset `job_intelligence`, BigQuery location `US`, region
+`us-central1`, and embedding topic `job-embedding-queue`; deployed values are **Unverified**.
+The embedding adapter also hardcodes a Vertex region; see A-1 in the backlog.
+
+Use [PROJECT_STRUCTURE.md](../../PROJECT_STRUCTURE.md) for entry points and infrastructure.
+Daily/weekly schedules and service minimum instances are intent unless verified in
+deployment. `infra/cloudbuild.yaml` contains active deploy steps despite its optional
+comment; it is not a read-only validation command. This guidance does not authorize it.
