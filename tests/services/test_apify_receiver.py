@@ -6,6 +6,8 @@ import hashlib
 import hmac
 import json
 import logging
+from copy import deepcopy
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -174,6 +176,9 @@ async def test_receiver_tracks_apply_url_fallback_and_logs(
     assert response["dataset_id"] == "dataset-xyz"
     assert response["received"] == 6
     assert response["normalized"] == 5
+    assert response["rejected"] == 1
+    assert response["unique"] == 5
+    assert response["in_batch_duplicates"] == 0
     assert response["apply_url_fallback"] == 3
     assert response["inserted"] == 5
     assert response["published"] == 5
@@ -1127,3 +1132,172 @@ async def test_verify_actor_run_helper():
     with pytest.raises(HTTPException) as exc4:
         await _verify_actor_run("run-conn", token, client=mock_client)
     assert exc4.value.status_code == 502
+
+
+@pytest.fixture
+def group1_ingestion(monkeypatch: pytest.MonkeyPatch):
+    """Run real normalization and batching, with every external operation replaced."""
+    from services import apify_receiver as receiver
+
+    resource = {
+        "id": "run-group1", "actId": "actor-group1", "status": "SUCCEEDED",
+        "defaultDatasetId": "dataset-group1",
+    }
+    settings = _make_test_settings()
+    fetch = AsyncMock()
+    repo = MagicMock()
+    repo.batch_insert_jobs = AsyncMock(side_effect=lambda jobs: [job.job_id for job in jobs])
+    repo.get_unembedded_job_ids = AsyncMock(return_value=[])
+    publish = AsyncMock(side_effect=lambda ids, **kwargs: (len(ids), 0))
+    monkeypatch.setattr(receiver, "get_settings", lambda: settings)
+    monkeypatch.setattr(receiver, "_verify_actor_run", AsyncMock(return_value=resource))
+    monkeypatch.setattr(receiver, "_fetch_dataset_items", fetch)
+    monkeypatch.setattr(receiver, "RawJobRepository", lambda: repo)
+    monkeypatch.setattr(receiver, "_publish_job_ids", publish)
+    payload = {"eventType": "ACTOR.RUN.SUCCEEDED", "resource": resource}
+    return payload, fetch, repo, publish
+
+
+@pytest.fixture
+def group1_dataset() -> list[dict[str, Any]]:
+    dataset_path = (
+        Path(__file__).resolve().parents[2]
+        / "Input/dataset_company-career-page-scraper_2026-09-17_06-15-27-909.json"
+    )
+    # This regression requires the downloaded fixture; never silently skip it.
+    return json.loads(dataset_path.read_text(encoding="utf-8-sig"))
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_group1_full_fixture_counts_and_order(group1_ingestion, group1_dataset):
+    from services.normalizers.apify_career_scraper import normalize
+
+    payload, fetch, repo, publish = group1_ingestion
+    original = deepcopy(group1_dataset)
+    fetch.return_value = group1_dataset
+    response = await apify_webhook(_build_mock_request(payload))
+
+    valid = [job for item in group1_dataset if (job := normalize(item)) is not None]
+    first_jobs = {}
+    for job in valid:
+        first_jobs.setdefault(job.job_id, job)
+    assert len(group1_dataset) == 215
+    assert len(valid) == 215
+    assert len(first_jobs) == 113
+    assert response == {
+        "dataset_id": "dataset-group1", "actor_run_id": "run-group1",
+        "received": 215, "normalized": 215, "rejected": 0,
+        "unique": 113, "in_batch_duplicates": 102, "apply_url_fallback": 89,
+        "inserted": 113, "published": 113, "publish_failures": 0, "recovered": 0,
+    }
+    submitted = repo.batch_insert_jobs.await_args.args[0]
+    assert [job.job_id for job in submitted] == list(first_jobs)
+    # Compare source-derived content, excluding the ingestion timestamp.
+    assert [job.model_dump(exclude={"scraped_at"}) for job in submitted] == [
+        job.model_dump(exclude={"scraped_at"}) for job in first_jobs.values()
+    ]
+    publish.assert_awaited_once_with(
+        list(first_jobs), project_id="test-project", topic="test-topic",
+    )
+    repo.get_unembedded_job_ids.assert_not_awaited()
+    assert group1_dataset == original
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_group1_full_fixture_malformed_then_valid_and_duplicates(
+    group1_ingestion, group1_dataset,
+):
+    from services.normalizers.apify_career_scraper import normalize
+
+    payload, fetch, repo, publish = group1_ingestion
+    first = group1_dataset[0]
+    # The invalid first occurrence must not reserve the canonical ID.
+    malformed = [
+        None, [], "not-an-object", 42,
+        {**first, "title": 123},
+        {**first, "jobId": {}},
+        {**first, "jobUrl": ["https://example.com/job"]},
+    ]
+    duplicate = {
+        **first, "jobId": f"  {first['jobId']}  ",
+        "title": "A later valid title that must not replace the first valid job",
+    }
+    nullable = {
+        **first, "jobId": "group1-null-optionals",
+        "location": None, "salary": None, "source": None,
+        "employmentType": None, "postedAt": {"invalid": "date"},
+    }
+    fetch.return_value = [*malformed, *group1_dataset, duplicate, nullable]
+    response = await apify_webhook(_build_mock_request(payload))
+
+    assert response["received"] == 224
+    assert response["normalized"] == 217
+    assert response["rejected"] == 7
+    assert response["unique"] == 114
+    assert response["in_batch_duplicates"] == 103
+    assert response["received"] == response["normalized"] + response["rejected"]
+    assert response["normalized"] == response["unique"] + response["in_batch_duplicates"]
+    submitted = repo.batch_insert_jobs.await_args.args[0]
+    expected_first = normalize(first)
+    assert expected_first is not None
+    assert submitted[0].model_dump(exclude={"scraped_at"}) == expected_first.model_dump(
+        exclude={"scraped_at"}
+    )
+    assert submitted[-1].job_id == "group1-null-optionals"
+    assert submitted[-1].location is None
+    assert submitted[-1].salary_raw is None
+    assert submitted[-1].posted_at is None
+    ids = [job.job_id for job in submitted]
+    assert len(ids) == len(set(ids)) == 114
+    publish.assert_awaited_once_with(ids, project_id="test-project", topic="test-topic")
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.parametrize("items", [[], [None, [], {"title": "missing required fields"}]])
+async def test_group1_empty_or_all_rejected_counters(group1_ingestion, items):
+    payload, fetch, repo, publish = group1_ingestion
+    fetch.return_value = items
+    response = await apify_webhook(_build_mock_request(payload))
+    assert response["received"] == response["rejected"] == len(items)
+    assert response["normalized"] == response["unique"] == response["in_batch_duplicates"] == 0
+    assert response["inserted"] == response["published"] == 0
+    assert response["dataset_id"] == "dataset-group1"
+    if items:
+        assert response["apply_url_fallback"] == 0
+        assert response["message"] == "All items were malformed or had insufficient description"
+    repo.batch_insert_jobs.assert_not_awaited()
+    publish.assert_not_awaited()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exception_type", [TypeError, ValueError])
+@pytest.mark.parametrize("operation", ["normalize", "resolve_job_url"])
+async def test_group1_receiver_isolates_record_errors(
+    group1_ingestion, mock_dataset_items, monkeypatch: pytest.MonkeyPatch,
+    exception_type, operation: str,
+):
+    from services.normalizers import apify_career_scraper
+
+    payload, fetch, repo, publish = group1_ingestion
+    bad = {"jobId": "bad-record"}
+    valid = mock_dataset_items[0]
+    fetch.return_value = [bad, valid]
+    original = getattr(apify_career_scraper, operation)
+
+    def fail_one(item):
+        if item is bad:
+            raise exception_type("malformed source record")
+        return original(item)
+
+    monkeypatch.setattr(apify_career_scraper, operation, fail_one)
+    response = await apify_webhook(_build_mock_request(payload))
+    assert response["received"] == 2
+    assert response["normalized"] == response["unique"] == 1
+    assert response["rejected"] == 1
+    assert response["in_batch_duplicates"] == 0
+    assert len(repo.batch_insert_jobs.await_args.args[0]) == 1
+    publish.assert_awaited_once()

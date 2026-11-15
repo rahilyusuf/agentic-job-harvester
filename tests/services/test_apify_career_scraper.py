@@ -134,7 +134,10 @@ def test_real_apify_dataset_fallbacks_and_totals():
       - applyUrl present: 215
       - With applyUrl fallback, all 215 items normalize successfully.
     """
-    dataset_path = Path("Input/dataset_company-career-page-scraper_2026-09-17_06-15-27-909.json")
+    dataset_path = (
+        Path(__file__).resolve().parents[2]
+        / "Input/dataset_company-career-page-scraper_2026-09-17_06-15-27-909.json"
+    )
     if not dataset_path.exists():
         pytest.skip("Local dataset file not found")
 
@@ -162,6 +165,7 @@ def test_real_apify_dataset_fallbacks_and_totals():
     assert direct_count == 126
     assert fallback_count == 89
     assert len(valid_jobs) == 215
+    assert len({job.job_id for job in valid_jobs}) == 113
 
 
 @pytest.mark.unit
@@ -243,3 +247,98 @@ def test_normalize_sanitizes_salary_and_employment_type(base_item: dict[str, Any
     assert "&lt;/scraped_content&gt;" in job.salary_raw
     assert job.employment_type_raw is not None
     assert len(job.employment_type_raw) <= 50
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("item", [None, [], ["job"], "job", 42, False])
+def test_normalize_rejects_non_object_records(item: object):
+    assert resolve_job_url(item) == ("", False)
+    assert normalize(item) is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "field",
+    [
+        "jobUrl", "applyUrl", "jobId", "title", "companyName", "companyDomain",
+        "descriptionText", "descriptionHtml", "location", "salary", "employmentType", "source",
+    ],
+)
+@pytest.mark.parametrize("value", [42, 0, False, [], {}])
+def test_normalize_rejects_wrong_type_text_fields(
+    base_item: dict[str, Any], field: str, value: object,
+):
+    item = {**base_item, "jobUrl": "https://example.com/job/typed", field: value}
+    if field == "applyUrl":
+        item["jobUrl"] = None
+    elif field == "companyDomain":
+        item["companyName"] = None
+    elif field == "descriptionHtml":
+        item["descriptionText"] = None
+    assert normalize(item) is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("field", ["jobId", "location", "salary", "employmentType", "source"])
+def test_normalize_accepts_null_optional_text(base_item: dict[str, Any], field: str):
+    from utils.ids import compute_job_id
+
+    item = {**base_item, "jobUrl": "https://example.com/job/nullable", field: None}
+    job = normalize(item)
+    assert job is not None
+    assert job.job_id == (
+        compute_job_id(item["jobUrl"]) if field == "jobId" else base_item["jobId"]
+    )
+    if field != "jobId":
+        attribute = {
+            "location": "location", "salary": "salary_raw",
+            "employmentType": "employment_type_raw", "source": "ats_platform",
+        }[field]
+        assert getattr(job, attribute) is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("value", [None, "", "not-a-date", 42, False, [], {}])
+def test_normalize_ignores_malformed_optional_date(base_item: dict[str, Any], value: object):
+    job = normalize({**base_item, "jobUrl": "https://example.com/job/date", "postedAt": value})
+    assert job is not None
+    assert job.posted_at is None
+
+
+@pytest.mark.unit
+def test_normalize_null_primary_fields_use_existing_fallbacks(base_item: dict[str, Any]):
+    item = {
+        **base_item,
+        "jobUrl": None,
+        "applyUrl": "https://example.com/apply/nullable",
+        "companyName": None,
+        "companyDomain": "example.com",
+        "descriptionText": None,
+        "descriptionHtml": "A valid job description with enough text to pass validation. " * 2,
+    }
+    job = normalize(item)
+    assert job is not None
+    assert str(job.job_url) == item["applyUrl"]
+    assert job.company == "example.com"
+    assert job.description == item["descriptionHtml"].strip()
+
+
+@pytest.mark.unit
+def test_normalize_preserves_primary_field_precedence(base_item: dict[str, Any]):
+    job = normalize({
+        **base_item,
+        "jobUrl": "https://example.com/job/primary",
+        "applyUrl": 42,
+        "companyDomain": [],
+        "descriptionHtml": {},
+    })
+    assert job is not None
+    assert str(job.job_url) == "https://example.com/job/primary"
+    assert job.company == base_item["companyName"]
+    assert job.description == base_item["descriptionText"].strip()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("field", ["title", "companyName", "descriptionText"])
+def test_normalize_rejects_null_required_text(base_item: dict[str, Any], field: str):
+    assert normalize({**base_item, "jobUrl": "https://example.com/job/required", field: None}) is None
