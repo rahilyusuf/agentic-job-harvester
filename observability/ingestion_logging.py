@@ -1,14 +1,13 @@
-"""Safe ingestion events using stdlib logging, request context and queued stdout."""
+"""Safe ingestion events using existing stdlib handlers and request context."""
 
 import hashlib
 import json
 import logging
-import logging.handlers
-import queue
 import re
 import sys
 import time
 import uuid
+from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -29,7 +28,7 @@ COUNTERS = (
 )
 _context: ContextVar["IngestionContext | None"] = ContextVar("ingestion_log_context", default=None)
 _logger = logging.getLogger("ingestion.events")
-_logger.setLevel(logging.INFO)
+_restore_logging: Callable[[], None] | None = None
 
 
 @dataclass
@@ -41,6 +40,7 @@ class IngestionContext:
     stage_started: float = field(default_factory=time.perf_counter)
     actor_run_id: str | None = None
     dataset_id: str | None = None
+    source_run_status: str | None = None
     secrets: list[str] = field(default_factory=list, repr=False)
     incomplete: bool = False
     record_index: int | None = None
@@ -89,6 +89,15 @@ def stage(name: str) -> None:
 
 
 def emit(event: str, level: int = logging.INFO, **fields: object) -> None:
+    record = _event_fields(event, level, fields)
+    _logger.log(
+        level,
+        json.dumps(record, separators=(",", ":")),
+        extra={"event": event, "event_fields": record},
+    )
+
+
+def _event_fields(event: str, level: int, fields: dict[str, object]) -> dict[str, object]:
     state = context()
     record: dict[str, object] = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -105,13 +114,23 @@ def emit(event: str, level: int = logging.INFO, **fields: object) -> None:
         record["parent_request_id_hash"] = state.parent_request_id_hash
     if state and state.record_index is not None:
         record["record_index"] = state.record_index
+    if state and state.source_run_status in ("SUCCEEDED", "ABORTED"):
+        record["source_run_status"] = state.source_run_status
     for key, value in fields.items():
         if key in COUNTERS and (value is None or type(value) is int):
             record[key] = value
             if state:
                 state.counters[key] = value
         elif (
-            key in {"duration_ms", "status_code", "attempt", "max_attempts", "existing_duplicates"}
+            key
+            in {
+                "duration_ms",
+                "status_code",
+                "attempt",
+                "max_attempts",
+                "existing_duplicates",
+                "retry_delay_ms",
+            }
             and type(value) is int
         ):
             record[key] = value
@@ -132,11 +151,7 @@ def emit(event: str, level: int = logging.INFO, **fields: object) -> None:
             "subscriber_processing",
         }:
             record[key] = identifier(value)
-    _logger.log(
-        level,
-        json.dumps(record, separators=(",", ":")),
-        extra={"event": event, "event_fields": record},
-    )
+    return record
 
 
 def error_fields(error: BaseException) -> dict[str, str | None]:
@@ -151,50 +166,81 @@ def error_fields(error: BaseException) -> dict[str, str | None]:
     return {"error_type": identifier(type(cause).__name__), "error_location": location}
 
 
-class _RetryFilter(logging.Filter):
-    def filter(self, record: logging.LogRecord) -> bool:
-        if context() is None:
-            return True
-        # Existing generic retry messages interpolate exception strings. Replace
-        # them only within ingestion requests; do not change retry execution.
-        args = record.args if isinstance(record.args, tuple) else ()
-        fields: dict[str, object] = {"error_category": "operation_retry"}
-        if len(args) >= 5:
-            fields.update(attempt=args[1], max_attempts=args[2])
-        emit("ingestion.operation.retry", record.levelno, **fields)
-        return False
+class IngestionFormatter(logging.Formatter):
+    """Render safe event fields; delegate unrelated records to their original formatter."""
+
+    def __init__(self, fallback: logging.Formatter | None, *, development: bool):
+        super().__init__()
+        self.fallback = fallback or logging.Formatter()
+        self.development = development
+
+    def format(self, record: logging.LogRecord) -> str:
+        fields = getattr(record, "event_fields", None)
+        if record.name == "utils.retry" and context() is not None:
+            retry = getattr(record, "retry_fields", None)
+            if isinstance(retry, dict):
+                fields = _event_fields("ingestion.operation.retry", record.levelno, retry)
+        if not isinstance(fields, dict):
+            return self.fallback.format(record)
+        if not self.development:
+            return json.dumps(fields, separators=(",", ":"))
+        details = " ".join(
+            f"{key}={json.dumps(value, ensure_ascii=True, separators=(',', ':'))}"
+            for key, value in fields.items()
+            if key not in {"timestamp", "severity", "message", "event"} and value is not None
+        )
+        return f"{fields['timestamp']} {fields['severity']} {fields['event']} {details}"
 
 
-class _HTTPFilter(logging.Filter):
-    def filter(self, record: logging.LogRecord) -> bool:
-        # HTTPX INFO includes complete URLs. Explicit stage events replace that
-        # redundant automatic request log during ingestion.
-        return context() is None
+def configure_ingestion_logging(*, environment: str, level: str = "INFO") -> Callable[[], None]:
+    """Wrap existing stream output once; return an idempotent restoration callback.
 
+    INGESTION_LOG_LEVEL=DEBUG enables record diagnostics without enabling HTTP wire logs.
+    Only explicit development gets readable output; all other environments get JSON.
+    """
+    global _restore_logging
+    if _restore_logging is not None:
+        return _restore_logging
+    root = logging.getLogger()
+    original_levels = {_logger: _logger.level}
+    owned = None
+    if not root.handlers:
+        owned = logging.StreamHandler(sys.stdout)
+        owned.setFormatter(
+            logging.Formatter(
+                "%(asctime)s %(levelname)-8s %(name)s  %(message)s", datefmt="%Y-%m-%dT%H:%M:%S"
+            )
+        )
+        root.addHandler(owned)
+        original_levels[root] = root.level
+        root.setLevel(logging.INFO)
+    original_formatters = {
+        handler: handler.formatter
+        for handler in root.handlers
+        if isinstance(handler, logging.StreamHandler)
+    }
+    for handler, formatter in original_formatters.items():
+        handler.setFormatter(
+            IngestionFormatter(formatter, development=environment.lower() == "development")
+        )
+    _logger.setLevel(level)
+    for name in ("httpx", "httpcore"):
+        target = logging.getLogger(name)
+        original_levels[target] = target.level
+        target.setLevel(logging.WARNING)
 
-for _name, _filter in (("utils.retry", _RetryFilter), ("httpx", _HTTPFilter)):
-    _target = logging.getLogger(_name)
-    if not any(isinstance(existing, _filter) for existing in _target.filters):
-        _target.addFilter(_filter())
+    def restore() -> None:
+        global _restore_logging
+        if _restore_logging is not restore:
+            return
+        for handler, formatter in original_formatters.items():
+            handler.setFormatter(formatter)
+        for target, previous in original_levels.items():
+            target.setLevel(previous)
+        if owned is not None:
+            root.removeHandler(owned)
+            owned.close()
+        _restore_logging = None
 
-
-def configure_ingestion_logging() -> logging.handlers.QueueListener:
-    """Configure only ingestion output; leave application/Uvicorn handlers intact."""
-    events: queue.SimpleQueue = queue.SimpleQueue()
-    handler = logging.handlers.QueueHandler(events)
-    output = logging.StreamHandler(sys.stdout)
-    output.setFormatter(logging.Formatter("%(message)s"))
-    _logger.addHandler(handler)
-    _logger.propagate = False
-    listener = logging.handlers.QueueListener(events, output)
-    listener.start()
-    return listener
-
-
-def stop_ingestion_logging(listener: logging.handlers.QueueListener) -> None:
-    listener.stop()
-    for handler in list(_logger.handlers):
-        if isinstance(handler, logging.handlers.QueueHandler) and handler.queue is listener.queue:
-            _logger.removeHandler(handler)
-            handler.close()
-    _logger.propagate = True
+    _restore_logging = restore
+    return restore

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import os
 from functools import lru_cache
-from typing import Optional
+from typing import Literal, Optional
 
 from google.cloud import secretmanager
 from pydantic import Field, field_validator, model_validator
@@ -87,6 +87,13 @@ class Settings(BaseSettings):
     )
 
     # ── Apify ─────────────────────────────────────────────────────────────────
+    ingestion_log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
+        default="INFO", description="Ingestion event verbosity; use DEBUG for local diagnostics"
+    )
+    apify_ingest_aborted_runs: bool = Field(
+        default=False,
+        description="Allow verified ACTOR.RUN.ABORTED events to ingest saved records",
+    )
     apify_webhook_secret: str = Field(
         default="", description="HMAC secret for Apify webhook validation"
     )
@@ -133,6 +140,11 @@ class Settings(BaseSettings):
     @classmethod
     def bq_location_upper(cls, v: str) -> str:
         return v.upper()
+
+    @field_validator("ingestion_log_level", mode="before")
+    @classmethod
+    def ingestion_log_level_upper(cls, value: object) -> object:
+        return value.upper() if isinstance(value, str) else value
 
     @field_validator("apify_allowed_actor_ids", mode="before")
     @classmethod

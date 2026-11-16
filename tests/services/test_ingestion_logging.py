@@ -1,6 +1,8 @@
 """Semantic logging regressions with mocked transport/persistence and synthetic secrets."""
 
 import asyncio
+import hashlib
+import hmac
 import io
 import json
 import logging
@@ -14,19 +16,19 @@ from observability.ingestion_logging import (
     context,
     emit,
     request_context,
-    stop_ingestion_logging,
 )
 from services import apify_receiver as receiver
 from tests.services.test_apify_receiver import _build_mock_request, _make_test_settings
+from utils.retry import async_retry, with_retry
 
 
-@pytest.fixture
-def ingestion(monkeypatch, caplog):
+@pytest.fixture(params=["SUCCEEDED", "ABORTED"])
+def ingestion(request, monkeypatch, caplog):
     caplog.set_level(logging.DEBUG, logger="ingestion.events")
     resource = {
         "id": "run-logging",
         "actId": "actor-logging",
-        "status": "SUCCEEDED",
+        "status": request.param,
         "defaultDatasetId": "dataset-logging",
     }
     item = {
@@ -42,12 +44,18 @@ def ingestion(monkeypatch, caplog):
     verify = AsyncMock(return_value=dict(resource))
     fetch = AsyncMock(return_value=[item])
     publish = AsyncMock(return_value=(1, 0))
-    monkeypatch.setattr(receiver, "get_settings", lambda: _make_test_settings())
+    monkeypatch.setattr(
+        receiver, "get_settings", lambda: _make_test_settings(apify_ingest_aborted_runs=True)
+    )
     monkeypatch.setattr(receiver, "RawJobRepository", lambda: repo)
     monkeypatch.setattr(receiver, "_verify_actor_run", verify)
     monkeypatch.setattr(receiver, "_fetch_dataset_items", fetch)
     monkeypatch.setattr(receiver, "_publish_job_ids", publish)
-    return resource, item, repo, verify, fetch, publish
+    restore = configure_ingestion_logging(environment="development", level="DEBUG")
+    try:
+        yield resource, item, repo, verify, fetch, publish
+    finally:
+        restore()
 
 
 def events(caplog):
@@ -59,7 +67,7 @@ async def invoke(ingestion, header=None):
     headers = [(b"x-request-id", header.encode())] if header else None
     return await receiver.apify_webhook(
         _build_mock_request(
-            {"eventType": "ACTOR.RUN.SUCCEEDED", "resource": resource},
+            {"eventType": f"ACTOR.RUN.{resource['status']}", "resource": resource},
             headers=headers,
         )
     )
@@ -87,6 +95,12 @@ async def test_success_summary_and_stage_durations(ingestion, caplog):
     assert all(record["duration_ms"] >= 0 for record in records)
     assert len({record["request_id"] for record in records}) == 1
     assert final["subscriber_processing"] == "not_observed"
+    assert final["source_run_status"] == ingestion[0]["status"]
+    aborted = [record for record in records if record["event"] == "ingestion.actor.aborted"]
+    assert len(aborted) == int(ingestion[0]["status"] == "ABORTED")
+    if aborted:
+        assert aborted[0]["severity"] == "WARNING"
+        assert aborted[0]["reason"] == "partial_source_dataset"
     assert context() is None
 
 
@@ -168,13 +182,13 @@ async def test_secret_payload_url_and_retry_messages_are_not_logged(ingestion, c
     item.update(title=secret, descriptionText=secret * 10, jobUrl=f"https://example.com/{secret}")
     resource["id"] = secret
     monkeypatch.setattr(
-        receiver, "get_settings", lambda: _make_test_settings(apify_api_token=secret)
+        receiver,
+        "get_settings",
+        lambda: _make_test_settings(apify_api_token=secret, apify_ingest_aborted_runs=True),
     )
 
+    @async_retry(max_attempts=1)
     async def fail(jobs):
-        logging.getLogger("utils.retry").warning(
-            "%s attempt %d/%d failed (%s)", "insert", 1, 3, secret
-        )
         logging.getLogger("httpx").info("GET https://example.com/?token=%s", secret)
         raise RuntimeError(secret)
 
@@ -210,7 +224,8 @@ async def test_real_repository_retry_logs_do_not_leak_partial_errors(
     assert secret not in caplog.text
     final = events(caplog)[-1]
     assert final["persistence_outcome"] == "unconfirmed" and final["inserted"] is None
-    assert any(record["event"] == "ingestion.operation.retry" for record in events(caplog))
+    retries = [record.retry_fields for record in caplog.records if hasattr(record, "retry_fields")]
+    assert [record["attempt"] for record in retries] == [1, 2, 3]
 
 
 def test_request_id_validation_and_context_reset(caplog):
@@ -239,20 +254,45 @@ async def test_concurrent_request_context_isolation():
     assert len(set(ids)) == 2 and context() is None
 
 
-def test_queue_output_is_json_and_logging_setup_preserves_existing_handlers():
+@pytest.mark.parametrize("environment", ["development", "production", "staging", ""])
+def test_output_and_setup_preserve_existing_handlers(environment):
     output = io.StringIO()
-    root_handlers = list(logging.getLogger().handlers)
-    with patch("observability.ingestion_logging.sys.stdout", output):
-        listener = configure_ingestion_logging()
+    root = logging.getLogger()
+    handler = logging.StreamHandler(output)
+    original = logging.Formatter("original: %(message)s")
+    handler.setFormatter(original)
+    root.addHandler(handler)
+    root_handlers = list(root.handlers)
+    levels = {
+        logging.getLogger(name): logging.getLogger(name).level
+        for name in ("", "httpx", "httpcore", "ingestion.events")
+    }
+    uvicorn_handlers = list(logging.getLogger("uvicorn.error").handlers)
+    try:
+        restore = configure_ingestion_logging(environment=environment)
         try:
+            assert configure_ingestion_logging(environment=environment) is restore
             with request_context(None):
                 emit("ingestion.webhook.received")
+            root.warning("unrelated")
         finally:
-            stop_ingestion_logging(listener)
-    record = json.loads(output.getvalue())
-    assert record["event"] == "ingestion.webhook.received"
-    assert record["severity"] == "INFO" and record["request_id"]
-    assert logging.getLogger().handlers == root_handlers
+            restore()
+            restore()
+        lines = output.getvalue().splitlines()
+        assert len(lines) == 2 and lines[1] == "original: unrelated"
+        if environment == "development":
+            assert "INFO ingestion.webhook.received request_id=" in lines[0]
+            assert "stage=" in lines[0] and "duration_ms=" in lines[0]
+        else:
+            record = json.loads(lines[0])
+            assert record["event"] == "ingestion.webhook.received"
+            assert record["severity"] == "INFO" and record["request_id"]
+        assert handler.formatter is original and root.handlers == root_handlers
+        assert logging.getLogger("uvicorn.error").handlers == uvicorn_handlers
+        assert all(target.level == previous for target, previous in levels.items())
+    finally:
+        root.removeHandler(handler)
+        handler.close()
 
 
 @pytest.mark.asyncio
@@ -308,3 +348,239 @@ def test_observability_flush_does_not_log_exception_secret(caplog):
     assert "LANGFUSE_SECRET_CANARY" not in caplog.text
     assert not any(r.exc_info for r in caplog.records)
     assert "RuntimeError" in caplog.text
+
+
+@pytest.mark.parametrize("level,visible", [("INFO", False), ("DEBUG", True)])
+def test_development_debug_is_explicit_and_transport_logs_stay_quiet(level, visible):
+    output = io.StringIO()
+    handler = logging.StreamHandler(output)
+    root = logging.getLogger()
+    root.addHandler(handler)
+    try:
+        restore = configure_ingestion_logging(environment="development", level=level)
+        try:
+            with request_context(None):
+                emit("ingestion.record.rejected", logging.DEBUG, reason="invalid_field")
+            for name in ("httpx", "httpcore"):
+                logging.getLogger(name).info("https://example.com/?token=TRANSPORT_SECRET")
+                logging.getLogger(name).debug("TRANSPORT_SECRET")
+        finally:
+            restore()
+        assert ("ingestion.record.rejected" in output.getvalue()) is visible
+        assert "TRANSPORT_SECRET" not in output.getvalue()
+    finally:
+        root.removeHandler(handler)
+        handler.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mode", ["hmac", "shared", "bearer", "invalid", "skipped", "missing_production"]
+)
+async def test_authentication_events_reflect_comparisons(ingestion, monkeypatch, caplog, mode):
+    secret = "AUTHENTICATION_SECRET_CANARY"
+    settings = _make_test_settings(
+        apify_ingest_aborted_runs=True,
+        apify_webhook_secret="" if mode in ("skipped", "missing_production") else secret,
+        environment="production" if mode == "missing_production" else "development",
+    )
+    monkeypatch.setattr(receiver, "get_settings", lambda: settings)
+    resource = ingestion[0]
+    payload = {"eventType": f"ACTOR.RUN.{resource['status']}", "resource": resource}
+    body = json.dumps(payload).encode()
+    headers = {
+        "hmac": [
+            (
+                b"x-apify-signature",
+                hmac.new(secret.encode(), body, hashlib.sha256).hexdigest().encode(),
+            )
+        ],
+        "shared": [(b"x-apify-webhook-secret", secret.encode())],
+        "bearer": [(b"authorization", f"Bearer {secret}".encode())],
+    }.get(mode)
+    request = _build_mock_request(body, headers=headers)
+    if mode in ("invalid", "missing_production"):
+        with pytest.raises(receiver.HTTPException):
+            await receiver.apify_webhook(request)
+    else:
+        await receiver.apify_webhook(request)
+    authentication = [
+        r for r in events(caplog) if r["event"].startswith("ingestion.authentication.")
+    ]
+    if mode in ("invalid", "missing_production"):
+        assert authentication == []
+    else:
+        assert len(authentication) == 1
+        verified = mode != "skipped"
+        assert authentication[0]["verified"] is verified
+        assert authentication[0]["authentication_required"] is verified
+        assert authentication[0]["event"] == (
+            "ingestion.authentication.verified" if verified else "ingestion.authentication.skipped"
+        )
+    assert secret not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_retry_formatter_preserves_request_correlation_without_filters():
+    output = io.StringIO()
+    root = logging.getLogger()
+    handler = logging.StreamHandler(output)
+    root.addHandler(handler)
+    filters = {name: list(logging.getLogger(name).filters) for name in ("httpx", "utils.retry")}
+    error = RuntimeError("RETRY_SECRET_CANARY")
+
+    @async_retry(max_attempts=2, base_delay=0)
+    async def operation():
+        raise error
+
+    try:
+        restore = configure_ingestion_logging(environment="production")
+        try:
+            with request_context(None) as state:
+                state.stage = "bigquery"
+                with pytest.raises(RuntimeError) as caught:
+                    await operation()
+                assert caught.value is error
+        finally:
+            restore()
+        records = [json.loads(line) for line in output.getvalue().splitlines()]
+        assert len(records) == 2
+        assert all(r["event"] == "ingestion.operation.retry" for r in records)
+        assert all(
+            r["request_id"] == state.request_id and r["stage"] == "bigquery" for r in records
+        )
+        assert [r["attempt"] for r in records] == [1, 2]
+        assert records[-1]["outcome"] == "exhausted"
+        assert "RETRY_SECRET_CANARY" not in output.getvalue()
+        assert all(
+            logging.getLogger(name).filters == original for name, original in filters.items()
+        )
+    finally:
+        root.removeHandler(handler)
+        handler.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("reraise", [False, True])
+@pytest.mark.parametrize("succeeds", [False, True])
+async def test_retry_execution_unchanged(asynchronous, reraise, succeeds, caplog):
+    error = RuntimeError("RETRY_EXECUTION_SECRET")
+    count = 0
+
+    def attempt():
+        nonlocal count
+        count += 1
+        if succeeds and count == 3:
+            return "done"
+        raise error
+
+    async def async_attempt():
+        return attempt()
+
+    decorator = async_retry if asynchronous else with_retry
+    operation = decorator(
+        max_attempts=3, base_delay=1, backoff_factor=3, max_delay=2, reraise=reraise
+    )(async_attempt if asynchronous else attempt)
+    with patch("utils.retry.asyncio.sleep", new_callable=AsyncMock) as async_sleep:
+        with patch("utils.retry.time.sleep") as sync_sleep:
+
+            async def invoke_operation():
+                return await operation() if asynchronous else operation()
+
+            if reraise and not succeeds:
+                with pytest.raises(RuntimeError) as caught:
+                    await invoke_operation()
+                assert caught.value is error
+            else:
+                assert await invoke_operation() == ("done" if succeeds else None)
+            calls = async_sleep.await_args_list if asynchronous else sync_sleep.call_args_list
+            assert [call.args[0] for call in calls] == [1, 2]
+            assert count == 3
+    assert "RETRY_EXECUTION_SECRET" not in caplog.text
+    assert all(not record.exc_info for record in caplog.records)
+
+
+@pytest.mark.parametrize(
+    "value,expected", [(None, "INFO"), ("debug", "DEBUG"), ("INFO", "INFO"), ("invalid", None)]
+)
+def test_ingestion_log_level_settings(monkeypatch, value, expected):
+    from pydantic import ValidationError
+
+    from config.settings import Settings
+
+    monkeypatch.delenv("INGESTION_LOG_LEVEL", raising=False)
+    if value is not None:
+        monkeypatch.setenv("INGESTION_LOG_LEVEL", value)
+    values = dict(
+        _env_file=None,
+        gcp_project_id="test-project",
+        litellm_proxy_base_url="http://localhost:4000",
+        litellm_proxy_api_key="dummy",
+        telegram_bot_token="dummy",
+        e2b_api_key="dummy",
+        apify_api_token="dummy",
+    )
+    with patch("config.settings._fetch_secret", side_effect=AssertionError("No secrets")):
+        if expected is None:
+            with pytest.raises(ValidationError):
+                Settings(**values)
+        else:
+            assert Settings(**values).ingestion_log_level == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [None, "setup", "flush"])
+async def test_receiver_lifespan_restores_logging_on_exit(monkeypatch, failure):
+    root = logging.getLogger()
+    original_handlers = list(root.handlers)
+    original_formatters = {handler: handler.formatter for handler in root.handlers}
+    original_levels = {
+        logging.getLogger(name): logging.getLogger(name).level
+        for name in ("", "ingestion.events", "httpx", "httpcore")
+    }
+    monkeypatch.setattr(
+        receiver, "get_settings", lambda: _make_test_settings(ingestion_log_level="DEBUG")
+    )
+    setup, flush = MagicMock(), MagicMock()
+    if failure:
+        (setup if failure == "setup" else flush).side_effect = RuntimeError(
+            "mock lifecycle failure"
+        )
+    monkeypatch.setattr(receiver, "setup_observability", setup)
+    monkeypatch.setattr(receiver, "flush_observability", flush)
+
+    async def cycle():
+        async with receiver.lifespan(receiver.app):
+            assert logging.getLogger("ingestion.events").level == logging.DEBUG
+            assert logging.getLogger("httpx").level == logging.WARNING
+
+    for _ in range(2):
+        if failure:
+            with pytest.raises(RuntimeError):
+                await cycle()
+        else:
+            await cycle()
+        assert root.handlers == original_handlers
+        assert all(
+            handler.formatter is formatter for handler, formatter in original_formatters.items()
+        )
+        assert all(target.level == level for target, level in original_levels.items())
+
+
+def test_fallback_handler_is_removed_when_logging_was_unconfigured():
+    root = logging.getLogger()
+    output = io.StringIO()
+    original_level = root.level
+    with (
+        patch.object(root, "handlers", []),
+        patch("observability.ingestion_logging.sys.stdout", output),
+    ):
+        restore = configure_ingestion_logging(environment="production")
+        try:
+            emit("ingestion.webhook.received")
+            assert len(root.handlers) == 1
+        finally:
+            restore()
+        assert root.handlers == [] and root.level == original_level
+    assert json.loads(output.getvalue())["event"] == "ingestion.webhook.received"

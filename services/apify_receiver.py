@@ -2,7 +2,7 @@
 
 Real Apify integration flow:
     Apify Actor run completes
-        → ACTOR.RUN.SUCCEEDED webhook fires (small event payload)
+        → ACTOR.RUN.SUCCEEDED (or opt-in ACTOR.RUN.ABORTED) webhook fires
         → This endpoint validates and parses the event
         → Extracts resource.defaultDatasetId
         → Fetches actual scraped items from Apify Dataset API (httpx async)
@@ -36,7 +36,6 @@ import hashlib
 import hmac
 import json
 import logging
-import sys
 from contextlib import asynccontextmanager
 from time import perf_counter
 from typing import Any, cast
@@ -56,7 +55,6 @@ from observability.ingestion_logging import (
     error_fields,
     request_context,
     stage,
-    stop_ingestion_logging,
 )
 from repositories.raw_jobs_repo import RawJobRepository
 from services.normalizers import apify_career_scraper
@@ -80,34 +78,20 @@ _PUBSUB_PUBLISH_TIMEOUT_S = 10.0  # seconds per message
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # type: ignore[type-arg]
     """Startup and shutdown lifecycle."""
-    # Enable INFO-level logging for all application modules.
-    #
-    # Why this approach (not basicConfig(force=True)):
-    #   - Uvicorn installs handlers on its OWN named loggers (uvicorn,
-    #     uvicorn.error, uvicorn.access) with propagate=False.  It leaves
-    #     the root logger untouched (level=WARNING, zero handlers).
-    #   - Our app loggers (services.*, repositories.*, etc.) propagate to
-    #     root by default.  Raising root to INFO means they emit; adding a
-    #     single root StreamHandler gives them somewhere to send records.
-    #   - force=True would discard uvicorn’s handlers — avoided here so
-    #     uvicorn’s own access/error logs continue working normally.
-    _LOG_FORMAT = "%(asctime)s %(levelname)-8s %(name)s  %(message)s"
-    _LOG_DATEFMT = "%Y-%m-%dT%H:%M:%S"
-    root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)
-    if not root_logger.handlers:
-        _handler = logging.StreamHandler(sys.stdout)
-        _handler.setFormatter(logging.Formatter(fmt=_LOG_FORMAT, datefmt=_LOG_DATEFMT))
-        root_logger.addHandler(_handler)
-    setup_observability()
-    ingestion_listener = configure_ingestion_logging()
-    logger.info("apify-receiver started")
+    settings = get_settings()
+    restore_logging = configure_ingestion_logging(
+        environment=settings.environment, level=settings.ingestion_log_level
+    )
     try:
+        setup_observability()
+        logger.info("apify-receiver started")
         yield
     finally:
-        flush_observability()
-        stop_ingestion_logging(ingestion_listener)
-        logger.info("apify-receiver shutting down")
+        try:
+            flush_observability()
+        finally:
+            logger.info("apify-receiver shutting down")
+            restore_logging()
 
 
 # ── FastAPI app ────────────────────────────────────────────────────────────────
@@ -194,12 +178,12 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
 
 
 async def _ingest_webhook(request: Request) -> dict[str, Any]:
-    """Receive an ACTOR.RUN.SUCCEEDED event from Apify.
+    """Receive a success event, or an explicitly enabled aborted-run event.
 
     The webhook body is a small event payload — NOT the scraped data.
     This endpoint:
       1. Validates the HMAC signature (if APIFY_WEBHOOK_SECRET is configured).
-      2. Parses the event and validates eventType == ACTOR.RUN.SUCCEEDED.
+      2. Validates event eligibility and exact agreement with the verified run status.
       3. Extracts resource.defaultDatasetId.
       4. Fetches the actual dataset items from the Apify Dataset API.
       5. Normalizes items into canonical RawJob records.
@@ -287,13 +271,16 @@ async def _ingest_webhook(request: Request) -> dict[str, Any]:
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Missing or invalid webhook credentials",
             )
+        emit("ingestion.authentication.verified", verified=True, authentication_required=True)
+    else:
+        emit(
+            "ingestion.authentication.skipped",
+            verified=False,
+            authentication_required=False,
+            reason="authentication_not_configured",
+        )
 
     # ── Step 3: Parse JSON body ────────────────────────────────────────────────
-    emit(
-        "ingestion.authentication.checked",
-        verified=bool(settings.apify_webhook_secret),
-        authentication_required=bool(settings.apify_webhook_secret),
-    )
     stage("event_validation")
     try:
         payload: dict[str, Any] = json.loads(body)
@@ -316,13 +303,22 @@ async def _ingest_webhook(request: Request) -> dict[str, Any]:
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Webhook payload missing eventType",
         )
-    if event_type != "ACTOR.RUN.SUCCEEDED":
+    expected_status = None
+    if event_type == "ACTOR.RUN.SUCCEEDED":
+        expected_status = "SUCCEEDED"
+    elif event_type == "ACTOR.RUN.ABORTED" and settings.apify_ingest_aborted_runs:
+        expected_status = "ABORTED"
+    if expected_status is None:
         emit("ingestion.ignored", outcome="ignored")
         return {
             "received": event_type,
             "inserted": 0,
             "published": 0,
-            "message": f"Event type '{event_type}' ignored; only ACTOR.RUN.SUCCEEDED is processed.",
+            "message": (
+                "ABORTED-run ingestion is disabled."
+                if event_type == "ACTOR.RUN.ABORTED"
+                else f"Event type '{event_type}' ignored; only ACTOR.RUN.SUCCEEDED and enabled ACTOR.RUN.ABORTED events are processed."
+            ),
         }
 
     # ── Step 5: Extract & validate actor run metadata ──────────────────────────
@@ -333,14 +329,14 @@ async def _ingest_webhook(request: Request) -> dict[str, Any]:
             detail="Webhook payload missing resource object",
         )
 
-    run_status: str = resource.get("status", "SUCCEEDED")
-    if run_status != "SUCCEEDED":
+    run_status: str = resource.get("status", expected_status)
+    if run_status != expected_status:
         emit("ingestion.ignored", outcome="ignored")
         return {
             "received": run_status,
             "inserted": 0,
             "published": 0,
-            "message": f"Actor run status '{run_status}' is not SUCCEEDED; skipped.",
+            "message": f"Actor run status '{run_status}' is not {expected_status}; skipped.",
         }
 
     actor_run_id: str = (
@@ -386,10 +382,10 @@ async def _ingest_webhook(request: Request) -> dict[str, Any]:
     emit("ingestion.actor.verification_started")
     verified_run = await _verify_actor_run(actor_run_id, settings.apify_api_token)
     verified_status = verified_run.get("status")
-    if verified_status != "SUCCEEDED":
+    if verified_status != expected_status:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Verified actor run status is '{verified_status}', expected 'SUCCEEDED'",
+            detail=f"Verified actor run status is '{verified_status}', expected '{expected_status}'",
         )
 
     verified_act_id = verified_run.get("actId") or verified_run.get("actorId")
@@ -399,12 +395,22 @@ async def _ingest_webhook(request: Request) -> dict[str, Any]:
             detail=f"Verified actor ID '{verified_act_id}' is not authorized",
         )
 
+    if state:
+        state.source_run_status = verified_status
     emit(
         "ingestion.actor.verified",
         verified=True,
         allowlist_enforced=bool(settings.apify_allowed_actor_ids),
     )
     stage("dataset_verification")
+    if expected_status == "ABORTED" and (
+        not isinstance(verified_run.get("defaultDatasetId"), str)
+        or not verified_run["defaultDatasetId"].strip()
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Verified aborted run is missing a valid defaultDatasetId",
+        )
     verified_dataset_id = (verified_run.get("defaultDatasetId") or "").strip()
     if verified_dataset_id and verified_dataset_id != dataset_id:
         raise HTTPException(
@@ -419,6 +425,12 @@ async def _ingest_webhook(request: Request) -> dict[str, Any]:
         logging.INFO if verified_dataset_id else logging.WARNING,
         verified=bool(verified_dataset_id),
     )
+    if expected_status == "ABORTED":
+        emit(
+            "ingestion.actor.aborted",
+            logging.WARNING,
+            reason="partial_source_dataset",
+        )
     stage("dataset_fetch")
     emit("ingestion.dataset.fetch_started")
     raw_items = await _fetch_dataset_items(dataset_id, settings.apify_api_token)
