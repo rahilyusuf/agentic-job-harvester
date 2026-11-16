@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from observability.ingestion_logging import (
+    IngestionFormatter,
     configure_ingestion_logging,
     context,
     emit,
@@ -281,8 +282,8 @@ def test_output_and_setup_preserve_existing_handlers(environment):
         lines = output.getvalue().splitlines()
         assert len(lines) == 2 and lines[1] == "original: unrelated"
         if environment == "development":
-            assert "INFO ingestion.webhook.received request_id=" in lines[0]
-            assert "stage=" in lines[0] and "duration_ms=" in lines[0]
+            assert "INFO  [Apify] Webhook received" in lines[0]
+            assert "request_id=" not in lines[0] and "stage=" not in lines[0]
         else:
             record = json.loads(lines[0])
             assert record["event"] == "ingestion.webhook.received"
@@ -584,3 +585,238 @@ def test_fallback_handler_is_removed_when_logging_was_unconfigured():
             restore()
         assert root.handlers == [] and root.level == original_level
     assert json.loads(output.getvalue())["event"] == "ingestion.webhook.received"
+
+
+def compact_record(event, level=logging.INFO, **values):
+    """Deterministic synthetic LogRecord; no payloads, clients or application settings."""
+    fields = {
+        "timestamp": "2026-11-16T06:11:43+00:00",
+        "severity": logging.getLevelName(level),
+        "message": event,
+        "event": event,
+        "request_id": "a12bc3456789abcdef",
+        "actor_run_id": "run-identifier",
+        "dataset_id": "dataset-identifier",
+        "stage": "pubsub",
+        "duration_ms": 2210,
+        **values,
+    }
+    return logging.makeLogRecord(
+        {
+            "name": "ingestion.events",
+            "levelno": level,
+            "levelname": logging.getLevelName(level),
+            "msg": json.dumps(fields),
+            "event": event,
+            "event_fields": fields,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "event,fields,expected",
+    [
+        ("ingestion.webhook.received", {}, "[Apify] Webhook received"),
+        ("ingestion.dataset.verified", {"verified": True}, "[Apify] Run and dataset verified"),
+        ("ingestion.dataset.verified", {"verified": False}, "dataset verification incomplete"),
+        ("ingestion.actor.aborted", {"source_run_status": "ABORTED"}, "ABORTED, partial source"),
+        ("ingestion.dataset.fetched", {"received": 215}, "[Fetch] 215 records (2.21s)"),
+        (
+            "ingestion.normalization.completed",
+            {"unique": 113, "in_batch_duplicates": 102, "rejected": 0},
+            "113 unique, 102 duplicates (2.21s)",
+        ),
+        (
+            "ingestion.normalization.completed",
+            {"unique": 2, "in_batch_duplicates": 1, "rejected": 3},
+            "2 unique, 1 duplicates, 3 rejected",
+        ),
+        (
+            "ingestion.bigquery.completed",
+            {"inserted": 110, "existing_duplicates": 3},
+            "[BigQuery] 110 inserted, 3 existing",
+        ),
+        (
+            "ingestion.recovery.completed",
+            {"recovered": 3, "outcome": "success"},
+            "[Recovery] 3 jobs recovered",
+        ),
+        (
+            "ingestion.recovery.completed",
+            {"recovered": 0, "outcome": "unconfirmed"},
+            "[Recovery] Recovery unconfirmed",
+        ),
+        (
+            "ingestion.recovery.failed",
+            {"error_type": "RuntimeError"},
+            "Recovery check failed: RuntimeError",
+        ),
+        (
+            "ingestion.pubsub.completed",
+            {"published": 113, "publish_failures": 0},
+            "[Pub/Sub] 113 published, 0 failed",
+        ),
+        (
+            "ingestion.pubsub.completed",
+            {"published": 2, "publish_failures": 1},
+            "[Pub/Sub] 2 published, 1 failed",
+        ),
+        ("ingestion.completed", {"outcome": "success"}, "[Complete] Ingestion successful"),
+        ("ingestion.completed", {"outcome": "partial"}, "[Complete] Ingestion partially completed"),
+        ("ingestion.completed", {"outcome": "empty"}, "[Complete] No records to ingest"),
+        (
+            "ingestion.completed",
+            {"outcome": "completed_with_rejections", "rejected": 5},
+            "completed with 5 rejected records",
+        ),
+        (
+            "ingestion.completed",
+            {"outcome": "publication_unconfirmed"},
+            "[Complete] Publication unconfirmed",
+        ),
+        (
+            "ingestion.failed",
+            {"persistence_outcome": "unconfirmed", "inserted": None},
+            "Persistence unconfirmed; stored row count unknown",
+        ),
+        (
+            "ingestion.failed",
+            {
+                "stage": "authentication",
+                "error_category": "request_rejected",
+                "status_code": 401,
+                "error_type": "HTTPException",
+            },
+            "[Auth] Request rejected (HTTPException, HTTP 401)",
+        ),
+        (
+            "ingestion.operation.retry",
+            {
+                "stage": "bigquery",
+                "attempt": 1,
+                "max_attempts": 3,
+                "error_type": "RuntimeError",
+                "retry_delay_ms": 1500,
+            },
+            "[BigQuery] Retry 1/3: RuntimeError; next attempt in 1.50s",
+        ),
+        (
+            "ingestion.operation.retry",
+            {"attempt": 3, "outcome": "exhausted", "error_type": "RuntimeError"},
+            "Retries exhausted after 3 attempts",
+        ),
+        ("ingestion.ignored", {}, "[Apify] Webhook ignored"),
+        (
+            "ingestion.future_event",
+            {"reason": "safe_reason"},
+            "ingestion.future_event — safe_reason",
+        ),
+    ],
+)
+def test_compact_summaries_preserve_structured_fields(event, fields, expected):
+    record = compact_record(event, **fields)
+    original = dict(record.event_fields)
+    text = IngestionFormatter(None, development=True).format(record)
+    assert expected in text
+    assert "run-identifier" not in text and "dataset-identifier" not in text
+    assert "a12bc345" not in text
+    assert record.event_fields == original
+    assert json.loads(IngestionFormatter(None, development=False).format(record)) == original
+
+
+def test_warning_references_and_timestamp_are_compact():
+    from datetime import datetime
+
+    record = compact_record("ingestion.actor.aborted", logging.WARNING)
+    text = IngestionFormatter(None, development=True).format(record)
+    local_time = (
+        datetime.fromisoformat(record.event_fields["timestamp"]).astimezone().strftime("%H:%M:%S")
+    )
+    assert text.startswith(local_time + " WARN ")
+    assert "[a12bc345]" in text and record.event_fields["request_id"] not in text
+
+
+@pytest.mark.parametrize(
+    "published,observed,worker_line",
+    [(113, "not_observed", True), (0, "not_observed", False), (113, None, False)],
+)
+def test_worker_note_is_only_a_view_of_confirmed_publication(published, observed, worker_line):
+    record = compact_record(
+        "ingestion.completed",
+        outcome="success",
+        published=published,
+        subscriber_processing=observed,
+        duration_ms=32141,
+    )
+    text = IngestionFormatter(None, development=True).format(record)
+    assert "Ingestion successful (32.14s)" in text
+    assert ("[Worker] Processing not verified" in text) is worker_line
+    assert len(text.splitlines()) == (2 if worker_line else 1)
+    assert record.event_fields["event"] == "ingestion.completed"
+
+
+@pytest.mark.parametrize("level,verbose", [("INFO", False), ("DEBUG", True)])
+def test_console_compaction_does_not_suppress_full_file_capture(level, verbose):
+    output = io.StringIO()
+    console = logging.StreamHandler(output)
+    # Exercise actual FileHandler setup with an in-memory stream; no filesystem I/O.
+    file_output = io.StringIO()
+    file_handler = logging.FileHandler("unused-ingestion-test.jsonl", encoding="utf-8", delay=True)
+    file_handler.stream = file_output
+    root = logging.getLogger()
+    root.addHandler(console)
+    root.addHandler(file_handler)
+    original_filters = list(console.filters)
+    try:
+        restore = configure_ingestion_logging(environment="development", level=level)
+        try:
+            with request_context(None) as state:
+                state.source_run_status = "ABORTED"
+                state.actor_run_id, state.dataset_id = "run-full", "dataset-full"
+                emit("ingestion.webhook.received")
+                emit("ingestion.authentication.verified", verified=True)
+                emit("ingestion.dataset.verified", verified=True)
+                emit("ingestion.actor.aborted", logging.WARNING, reason="partial_source_dataset")
+                emit("ingestion.future_event", reason="safe_reason")
+                emit("ingestion.normalization.started")
+                emit("ingestion.normalization.started", logging.WARNING, reason="unexpected")
+        finally:
+            restore()
+        file_handler.flush()
+        captured = [json.loads(line) for line in file_output.getvalue().splitlines()]
+        assert len(captured) == 7
+        assert all(
+            r["request_id"] == state.request_id and r["dataset_id"] == "dataset-full"
+            for r in captured
+        )
+        lines = output.getvalue().splitlines()
+        headers = [line for line in lines if line and not line.startswith("    ")]
+        assert len(headers) == (7 if verbose else 4)
+        assert ("\n\n" in output.getvalue()) is verbose
+        assert ("ingestion.authentication.verified" in output.getvalue()) is verbose
+        assert (state.request_id in output.getvalue()) is verbose
+        assert "safe_reason" in output.getvalue() and "unexpected" in output.getvalue()
+        assert console.filters == original_filters
+    finally:
+        root.removeHandler(console)
+        root.removeHandler(file_handler)
+        console.close()
+        file_handler.close()
+
+
+def test_verbose_console_separates_headers_and_wraps_metadata():
+    record = compact_record("ingestion.dataset.fetched", received=215)
+    original = dict(record.event_fields)
+    text = IngestionFormatter(None, development=True, verbose=True).format(record)
+    lines = text.splitlines()
+    assert "INFO  ingestion.dataset.fetched" in lines[0]
+    assert "request_id=" not in lines[0]
+    assert all(line.startswith("    ") for line in lines[1:])
+    assert all(len(line) <= 100 for line in lines)
+    assert 'request_id="a12bc3456789abcdef"' in text
+    assert 'actor_run_id="run-identifier"' in text
+    assert 'dataset_id="dataset-identifier"' in text
+    assert "received=215" in text and text.endswith("\n")
+    assert record.event_fields == original
+    production = IngestionFormatter(None, development=False, verbose=True).format(record)
+    assert "\n" not in production and json.loads(production) == original

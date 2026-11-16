@@ -75,7 +75,7 @@ fail_under = 70
 show_missing = true
 
 [tool.poe.tasks]
-dev = "uvicorn services.apify_receiver:app --reload"
+dev = "python -m uvicorn services.apify_receiver:app --reload --host 127.0.0.1 --port 8000"
 test = "pytest"
 bootstrap = "python scripts/local_bootstrap.py"
 lint = "ruff check ."

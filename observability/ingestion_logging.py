@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import sys
+import textwrap
 import time
 import uuid
 from collections.abc import Callable
@@ -166,13 +167,141 @@ def error_fields(error: BaseException) -> dict[str, str | None]:
     return {"error_type": identifier(type(cause).__name__), "error_location": location}
 
 
+_STAGE_LABELS = {
+    "configuration": "Apify",
+    "authentication": "Auth",
+    "event_validation": "Apify",
+    "actor_authorization": "Apify",
+    "actor_verification": "Apify",
+    "dataset_verification": "Apify",
+    "dataset_fetch": "Fetch",
+    "normalization": "Normalize",
+    "bigquery": "BigQuery",
+    "recovery": "Recovery",
+    "pubsub": "Pub/Sub",
+}
+
+
+def _compact_summary(fields: dict[str, object]) -> tuple[str, str]:
+    """Present only trusted metadata; never render payloads or exception strings."""
+    event = fields.get("event")
+    label = _STAGE_LABELS.get(str(fields.get("stage")), "Ingestion")
+
+    def count(key: str) -> object:
+        value = fields.get(key)
+        return value if type(value) is int else "unknown"
+
+    if event == "ingestion.webhook.received":
+        return "Apify", "Webhook received"
+    if event == "ingestion.dataset.verified":
+        return "Apify", (
+            "Run and dataset verified"
+            if fields.get("verified") is True
+            else "Run verified; dataset verification incomplete"
+        )
+    if event == "ingestion.actor.aborted":
+        return "Apify", "Run and dataset verified — ABORTED, partial source"
+    if event == "ingestion.dataset.fetched":
+        return "Fetch", f"{count('received')} records"
+    if event == "ingestion.normalization.completed":
+        summary = f"{count('unique')} unique, {count('in_batch_duplicates')} duplicates"
+        if fields.get("rejected"):
+            summary += f", {count('rejected')} rejected"
+        return "Normalize", summary
+    if event == "ingestion.bigquery.completed":
+        return "BigQuery", f"{count('inserted')} inserted, {count('existing_duplicates')} existing"
+    if event == "ingestion.recovery.completed":
+        if fields.get("outcome") == "unconfirmed":
+            return "Recovery", "Recovery unconfirmed"
+        # Standalone reconciliation also emits publication counters.
+        summary = f"{count('recovered')} jobs recovered"
+        if "publish_failures" in fields:
+            summary += f", {count('published')} published, {count('publish_failures')} failed"
+        return "Recovery", summary
+    if event == "ingestion.recovery.failed":
+        return "Recovery", f"Recovery check failed: {fields.get('error_type') or 'unknown error'}"
+    if event == "ingestion.pubsub.completed":
+        return "Pub/Sub", f"{count('published')} published, {count('publish_failures')} failed"
+    if event == "ingestion.pubsub.publish_unconfirmed":
+        return "Pub/Sub", f"Publication unconfirmed: {fields.get('error_type') or 'unknown error'}"
+    if event == "ingestion.completed":
+        outcome = fields.get("outcome")
+        summary = {
+            "success": "Ingestion successful",
+            "empty": "No records to ingest",
+            "partial": "Ingestion partially completed",
+            "completed_with_rejections": (
+                f"Ingestion completed with {count('rejected')} rejected records"
+            ),
+            "publication_unconfirmed": "Publication unconfirmed",
+        }.get(str(outcome), f"Ingestion completed: {outcome or 'unknown outcome'}")
+        return "Complete", summary
+    if event == "ingestion.failed":
+        if fields.get("persistence_outcome") == "unconfirmed":
+            return "BigQuery", "Persistence unconfirmed; stored row count unknown"
+        summary = (
+            "Request rejected"
+            if fields.get("error_category") == "request_rejected"
+            else "Operation failed"
+        )
+        details = [str(fields[key]) for key in ("error_type",) if fields.get(key)]
+        if fields.get("status_code") is not None:
+            details.append(f"HTTP {fields['status_code']}")
+        return label, summary + (f" ({', '.join(details)})" if details else "")
+    if event == "ingestion.operation.retry":
+        if fields.get("outcome") == "exhausted":
+            return (
+                label,
+                f"Retries exhausted after {count('attempt')} attempts: {fields.get('error_type')}",
+            )
+        delay = fields.get("retry_delay_ms", 0)
+        return label, (
+            f"Retry {count('attempt')}/{count('max_attempts')}: {fields.get('error_type')}"
+            f"; next attempt in {delay / 1000:.2f}s"
+        )
+    if event == "ingestion.ignored":
+        return "Apify", "Webhook ignored"
+    details = [str(fields[key]) for key in ("reason", "outcome", "error_type") if fields.get(key)]
+    return label, str(event) + (f" — {', '.join(details)}" if details else "")
+
+
+class _CompactConsoleFilter(logging.Filter):
+    """Hide routine milestones on this console handler only; retain all anomalies."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        fields = getattr(record, "event_fields", None)
+        if record.levelno >= logging.WARNING or not isinstance(fields, dict):
+            return True
+        if (
+            fields.get("event") == "ingestion.dataset.verified"
+            and fields.get("source_run_status") == "ABORTED"
+        ):
+            return False  # The subsequent warning combines verified provenance and partial source.
+        return fields.get("event") not in {
+            "ingestion.authentication.verified",
+            "ingestion.authentication.skipped",
+            "ingestion.event.validated",
+            "ingestion.actor.authorized",
+            "ingestion.actor.verification_started",
+            "ingestion.actor.verified",
+            "ingestion.dataset.fetch_started",
+            "ingestion.normalization.started",
+            "ingestion.bigquery.started",
+            "ingestion.recovery.started",
+            "ingestion.pubsub.started",
+        }
+
+
 class IngestionFormatter(logging.Formatter):
     """Render safe event fields; delegate unrelated records to their original formatter."""
 
-    def __init__(self, fallback: logging.Formatter | None, *, development: bool):
+    def __init__(
+        self, fallback: logging.Formatter | None, *, development: bool, verbose: bool = False
+    ):
         super().__init__()
         self.fallback = fallback or logging.Formatter()
         self.development = development
+        self.verbose = verbose
 
     def format(self, record: logging.LogRecord) -> str:
         fields = getattr(record, "event_fields", None)
@@ -184,18 +313,55 @@ class IngestionFormatter(logging.Formatter):
             return self.fallback.format(record)
         if not self.development:
             return json.dumps(fields, separators=(",", ":"))
-        details = " ".join(
+        timestamp = (
+            datetime.fromisoformat(str(fields["timestamp"])).astimezone().strftime("%H:%M:%S")
+        )
+        severity = "WARN" if record.levelno == logging.WARNING else str(fields["severity"])
+        if not self.verbose:
+            label, summary = _compact_summary(fields)
+            timed_events = {
+                "ingestion.dataset.fetched",
+                "ingestion.normalization.completed",
+                "ingestion.bigquery.completed",
+                "ingestion.recovery.completed",
+                "ingestion.pubsub.completed",
+                "ingestion.completed",
+                "ingestion.failed",
+            }
+            if fields.get("event") in timed_events:
+                summary += f" ({fields['duration_ms'] / 1000:.2f}s)"
+            if record.levelno >= logging.WARNING and fields.get("request_id"):
+                summary += f" [{str(fields['request_id'])[:8]}]"
+            line = f"{timestamp} {severity:<5} [{label}] {summary}"
+            if (
+                fields.get("event") == "ingestion.completed"
+                and type(fields.get("published")) is int
+                and fields["published"] > 0
+                and fields.get("subscriber_processing") == "not_observed"
+            ):
+                line += f"\n{timestamp} INFO  [Worker] Processing not verified"
+            return line
+        details = "  ".join(
             f"{key}={json.dumps(value, ensure_ascii=True, separators=(',', ':'))}"
             for key, value in fields.items()
             if key not in {"timestamp", "severity", "message", "event"} and value is not None
         )
-        return f"{fields['timestamp']} {fields['severity']} {fields['event']} {details}"
+        wrapped = textwrap.fill(
+            details,
+            width=100,
+            initial_indent="    ",
+            subsequent_indent="    ",
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+        # StreamHandler supplies the final newline, leaving a blank line between events.
+        return f"{timestamp} {severity:<5} {fields['event']}\n{wrapped}\n"
 
 
 def configure_ingestion_logging(*, environment: str, level: str = "INFO") -> Callable[[], None]:
     """Wrap existing stream output once; return an idempotent restoration callback.
 
-    INGESTION_LOG_LEVEL=DEBUG enables record diagnostics without enabling HTTP wire logs.
+    INGESTION_LOG_LEVEL=DEBUG shows all events and safe fields without HTTP wire logs.
     Only explicit development gets readable output; all other environments get JSON.
     """
     global _restore_logging
@@ -219,10 +385,18 @@ def configure_ingestion_logging(*, environment: str, level: str = "INFO") -> Cal
         for handler in root.handlers
         if isinstance(handler, logging.StreamHandler)
     }
+    console_filters = []
     for handler, formatter in original_formatters.items():
-        handler.setFormatter(
-            IngestionFormatter(formatter, development=environment.lower() == "development")
+        development = environment.lower() == "development" and not isinstance(
+            handler, logging.FileHandler
         )
+        handler.setFormatter(
+            IngestionFormatter(formatter, development=development, verbose=level == "DEBUG")
+        )
+        if development and level != "DEBUG":
+            compact_filter = _CompactConsoleFilter()
+            handler.addFilter(compact_filter)
+            console_filters.append((handler, compact_filter))
     _logger.setLevel(level)
     for name in ("httpx", "httpcore"):
         target = logging.getLogger(name)
@@ -233,6 +407,8 @@ def configure_ingestion_logging(*, environment: str, level: str = "INFO") -> Cal
         global _restore_logging
         if _restore_logging is not restore:
             return
+        for handler, compact_filter in console_filters:
+            handler.removeFilter(compact_filter)
         for handler, formatter in original_formatters.items():
             handler.setFormatter(formatter)
         for target, previous in original_levels.items():
