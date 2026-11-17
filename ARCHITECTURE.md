@@ -60,6 +60,34 @@ Evidence tests: [test_apify_receiver.py](tests/services/test_apify_receiver.py),
 behavior, credentials/provenance checks, publication recovery, and these regressions.
 Generic n8n ingestion is **Planned**; this actor-specific receiver is not evidence for it.
 
+### Opt-in durable publication and worker claims
+
+The flow above describes the default legacy path. **Implemented, opt-in:**
+`PUBLICATION_LEDGER_ENABLED` selects atomic raw-job/publication-intent DML in
+`repositories/raw_jobs_repo.py`, the DML-only `repositories/publications_repo.py`,
+and the shared dispatcher/composition in `services/publication_dispatcher.py` and
+`services/ingestion_publications.py`. `sql/job_publications.sql` defines the sidecar;
+raw schemas, source IDs, provider settings and webhook request shape stay unchanged.
+`BatchInsertResult` separates inserted/existing/rejected/unconfirmed IDs; publication
+and processing claims are typed in `schemas/publication_models.py`.
+
+PENDING/IN_FLIGHT/PUBLISHED/UNKNOWN describe broker publication, not embedding readiness.
+Transactions serialize mutations through a no-op DELETE guard; leased claims and fenced
+checkpoints suppress routine republication. SDK query uncertainty is resolved through
+the same query job ID. Broker-acceptance/checkpoint crashes remain at-least-once.
+The worker's opt-in claim commits vector persistence, raw status and processing completion
+together. Busy deliveries retry instead of ACKing incomplete work; completed duplicates
+skip. This is not a guarantee of exactly-once provider computation after crash/timeout.
+
+**Unverified / rollout required:** live schema, SQL execution/transaction contention,
+streaming-buffer clearance, IAM, routing, schedules and migration evidence. The feature
+defaults off; no application startup creates resources or migrates existing jobs.
+`scripts/plan_publication_migration.py` only produces a local manifest: existing NEW_RAW
+jobs without evidence remain UNKNOWN, with no automatic replay or fabricated timestamps.
+See [rollout and contracts](docs/ingestion-publications.md) and mocked
+[reliability tests](tests/services/test_publication_reliability.py). HTTP reconciliation
+now requires an explicitly configured `RECONCILIATION_SECRET`, independently of the flag.
+
 ## Model access
 
 **Implemented:** [agents/base.py](agents/base.py) defines an abstract Python

@@ -12,10 +12,11 @@ Real Apify integration flow:
         → Publishes ONLY newly inserted job_ids to Pub/Sub (async-safe)
 
 Idempotency strategy: OPTION 2 — job-level deduplication.
-    Duplicate webhook deliveries are safe: the same run's dataset may be
-    re-fetched, but BigQuery dedup ensures no duplicate rows are inserted
-    and no duplicate Pub/Sub messages are published for already-existing jobs.
-    This requires no extra storage and is consistent with the existing architecture.
+    Legacy recovery selects NEW_RAW and may republish previously published jobs.
+    With PUBLICATION_LEDGER_ENABLED, guarded DML persists jobs and publication
+    intentions atomically. Confirmed publications are excluded from recovery.
+    Broker confirmation is independent of embedding progress; crash-window
+    duplicates still require idempotent workers. See docs/ingestion-publications.md.
 
 Webhook authentication:
     Apify does not natively sign webhook requests with HMAC.
@@ -41,7 +42,7 @@ from time import perf_counter
 from typing import Any, cast
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from google.cloud import pubsub_v1
 
@@ -129,6 +130,23 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
         emit("ingestion.webhook.received")
         try:
             result = await _ingest_webhook(request)
+        except asyncio.CancelledError as exc:
+            fields: dict[str, object] = {}
+            if state.stage == "bigquery":
+                fields["persistence_outcome"] = "unconfirmed"
+            elif state.stage == "pubsub":
+                fields["reason"] = "publication_confirmation_incomplete"
+            emit(
+                "ingestion.cancelled",
+                logging.WARNING,
+                outcome="cancelled",
+                error_category="operation_cancelled",
+                duration_ms=round((perf_counter() - state.started) * 1000),
+                **state.counters,
+                **error_fields(exc),
+                **fields,
+            )
+            raise
         except Exception as exc:
             code = exc.status_code if isinstance(exc, HTTPException) else 500
             rejected = code < 500 and state.stage in {
@@ -137,7 +155,7 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
                 "actor_authorization",
             }
             category = "request_rejected" if rejected else "operation_failed"
-            fields: dict[str, object] = {}
+            fields = {}
             if state.stage == "bigquery":
                 category = "persistence_unconfirmed"
                 fields["persistence_outcome"] = "unconfirmed"
@@ -152,8 +170,14 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
                 **fields,
             )
             raise
-        if not isinstance(result.get("received"), int):
-            return result  # Ignored events have their own explicit terminal event.
+        if state.ignored:
+            emit(
+                "ingestion.ignored",
+                outcome="ignored",
+                duration_ms=round((perf_counter() - state.started) * 1000),
+                **state.counters,
+            )
+            return result
         counts = {key: result.get(key, state.counters.get(key) or 0) for key in COUNTERS}
         outcome = "success"
         if counts["publish_failures"] and not counts["published"]:
@@ -221,6 +245,7 @@ async def _ingest_webhook(request: Request) -> dict[str, Any]:
                 "telegram_bot_token",
                 "e2b_api_key",
                 "langfuse_secret_key",
+                "reconciliation_secret",
             )
             if isinstance(value := getattr(settings, name, None), str) and value
         ]
@@ -309,7 +334,8 @@ async def _ingest_webhook(request: Request) -> dict[str, Any]:
     elif event_type == "ACTOR.RUN.ABORTED" and settings.apify_ingest_aborted_runs:
         expected_status = "ABORTED"
     if expected_status is None:
-        emit("ingestion.ignored", outcome="ignored")
+        if state:
+            state.ignored = True
         return {
             "received": event_type,
             "inserted": 0,
@@ -331,7 +357,8 @@ async def _ingest_webhook(request: Request) -> dict[str, Any]:
 
     run_status: str = resource.get("status", expected_status)
     if run_status != expected_status:
-        emit("ingestion.ignored", outcome="ignored")
+        if state:
+            state.ignored = True
         return {
             "received": run_status,
             "inserted": 0,
@@ -485,6 +512,16 @@ async def _ingest_webhook(request: Request) -> dict[str, Any]:
             "message": "All items were malformed or had insufficient description",
         }
 
+    if settings.publication_ledger_enabled:
+        from services.ingestion_publications import ingest_with_publications
+
+        return await ingest_with_publications(
+            batch,
+            dataset_id=dataset_id,
+            actor_run_id=actor_run_id,
+            settings=settings,
+        )
+
     # ── Step 8: Batch insert with deduplication ────────────────────────────────
 
     stage("bigquery")
@@ -587,11 +624,29 @@ async def _ingest_webhook(request: Request) -> dict[str, Any]:
 @app.post("/jobs/reconcile", status_code=status.HTTP_200_OK)
 @app.post("/reconcile", status_code=status.HTTP_200_OK)
 async def trigger_reconciliation(
-    limit: int = 100,
-    min_age_seconds: int = 0,
+    request: Request,
+    limit: int = Query(100, ge=1, le=1000),
+    min_age_seconds: int = Query(0, ge=0, le=31536000),
 ) -> dict[str, Any]:
     """Endpoint to trigger out-of-band reconciliation of saved-but-unembedded jobs."""
-    return await reconcile_unpublished_jobs(limit=limit, min_age_seconds=min_age_seconds)
+    secret = get_settings().reconciliation_secret
+    if not secret:
+        raise HTTPException(503, "Reconciliation authentication is not configured")
+    header = request.headers.get("Authorization", "")
+    if not hmac.compare_digest(header, f"Bearer {secret}"):
+        raise HTTPException(401, "Invalid reconciliation credentials")
+    try:
+        return await reconcile_unpublished_jobs(limit=limit, min_age_seconds=min_age_seconds)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        emit(
+            "ingestion.recovery.failed",
+            logging.ERROR,
+            error_category="recovery_unconfirmed",
+            **error_fields(exc),
+        )
+        raise HTTPException(502, "Reconciliation outcome unconfirmed") from exc
 
 
 async def reconcile_unpublished_jobs(
@@ -615,6 +670,41 @@ async def reconcile_unpublished_jobs(
     """
     settings = get_settings()
     active_repo = repo or RawJobRepository()
+
+    if not 1 <= limit <= 1000 or not 0 <= min_age_seconds <= 31536000:
+        raise ValueError("Invalid reconciliation bounds")
+    if settings.publication_ledger_enabled:
+        from services.publication_dispatcher import dispatch_pending
+
+        published = failures = reconciled = 0
+        ids = []
+        for offset in range(0, limit, 100):
+            result = await dispatch_pending(
+                active_repo.publications,
+                project_id=settings.gcp_project_id,
+                topic=settings.pubsub_embedding_topic,
+                limit=min(100, limit - offset),
+                min_age_seconds=min_age_seconds,
+            )
+            ids.extend(result.attempted_ids)
+            reconciled += len(result.attempted_ids)
+            published += len(result.confirmed)
+            failures += len(result.unconfirmed_ids)
+            if len(result.attempted_ids) < min(100, limit - offset):
+                break
+        emit(
+            "ingestion.recovery.completed",
+            logging.WARNING if failures else logging.INFO,
+            recovered=reconciled,
+            published=published,
+            publish_failures=failures,
+        )
+        return {
+            "reconciled": reconciled,
+            "published": published,
+            "publish_failures": failures,
+            "job_ids": ids,
+        }
 
     emit("ingestion.recovery.started")
     unembedded_ids = await active_repo.get_unembedded_job_ids(

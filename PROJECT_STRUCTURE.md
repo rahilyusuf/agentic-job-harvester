@@ -28,6 +28,13 @@ are added, removed, or renamed.
 | [services/apify_receiver.py](services/apify_receiver.py) | FastAPI `/webhook/apify`, `/health`, `/reconcile`, `/jobs/reconcile`; actor-event ingestion and publication recovery |
 | [services/normalizers/apify_career_scraper.py](services/normalizers/apify_career_scraper.py) | Actor-specific item normalization, URL fallback and ingestion sanitization |
 | [services/embedding_worker.py](services/embedding_worker.py) | FastAPI Pub/Sub push `/`, `/health`; consumes job embedding messages |
+| [services/ingestion_publications.py](services/ingestion_publications.py) | Opt-in atomic-ingestion/publication composition |
+| [services/publication_dispatcher.py](services/publication_dispatcher.py) | Bounded claim-first publishing and durable broker confirmation |
+| [repositories/publications_repo.py](repositories/publications_repo.py) | DML-only publication and processing leases/checkpoints |
+| [schemas/publication_models.py](schemas/publication_models.py) | Typed persistence outcomes, publication identity and claims |
+| [sql/job_publications.sql](sql/job_publications.sql) | Sidecar ledger DDL; separate reviewed deployment required |
+| [scripts/plan_publication_migration.py](scripts/plan_publication_migration.py) | Offline evidence-first manifest generation; never applies migration |
+| [docs/ingestion-publications.md](docs/ingestion-publications.md) | Rollout gates, legacy migration and reliability limits |
 | [services/user_profile_service.py](services/user_profile_service.py) | FastAPI profile write endpoint and health route |
 | [services/tier1_matcher_runner.py](services/tier1_matcher_runner.py) | Async `main()` and per-user runner; daily scheduling intent is Unverified |
 | [services/telegram_webhook.py](services/telegram_webhook.py) | FastAPI Telegram callback and health routes |

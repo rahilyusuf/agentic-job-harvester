@@ -67,6 +67,12 @@ class Settings(BaseSettings):
     firestore_database_id: str = Field(default="(default)", description="Firestore database ID")
 
     # ── Pub/Sub ───────────────────────────────────────────────────────────────
+    publication_ledger_enabled: bool = Field(
+        default=False, description="Enable reviewed BigQuery outbox and processing claims"
+    )
+    publication_lease_seconds: int = Field(default=1800, ge=1200, le=7200)
+    publication_worker_timeout_seconds: int = Field(default=300, ge=5, le=600)
+    reconciliation_secret: str = Field(default="", exclude=True)
     pubsub_embedding_topic: str = Field(
         default="job-embedding-queue", description="Pub/Sub topic for job embedding queue"
     )

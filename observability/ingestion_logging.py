@@ -44,6 +44,7 @@ class IngestionContext:
     source_run_status: str | None = None
     secrets: list[str] = field(default_factory=list, repr=False)
     incomplete: bool = False
+    ignored: bool = False
     record_index: int | None = None
     counters: dict[str, int | None] = field(default_factory=lambda: dict.fromkeys(COUNTERS))
 
@@ -131,6 +132,9 @@ def _event_fields(event: str, level: int, fields: dict[str, object]) -> dict[str
                 "max_attempts",
                 "existing_duplicates",
                 "retry_delay_ms",
+                "publication_pending",
+                "publication_in_flight",
+                "publication_unknown",
             }
             and type(value) is int
         ):
@@ -150,6 +154,7 @@ def _event_fields(event: str, level: int, fields: dict[str, object]) -> dict[str
             "reason",
             "persistence_outcome",
             "subscriber_processing",
+            "query_job_id",
         }:
             record[key] = identifier(value)
     return record
@@ -193,6 +198,33 @@ def _compact_summary(fields: dict[str, object]) -> tuple[str, str]:
 
     if event == "ingestion.webhook.received":
         return "Apify", "Webhook received"
+    if event == "ingestion.actor.verification_started":
+        return "Apify", "Verifying run..."
+    if event == "ingestion.dataset.fetch_started":
+        return "Fetch", "Fetching dataset..."
+    if event == "ingestion.normalization.started":
+        return "Normalize", (
+            f"Normalizing and deduplicating {count('received')} records..."
+            if type(fields.get("received")) is int
+            else "Normalizing and deduplicating records..."
+        )
+    if event == "ingestion.bigquery.started":
+        return "BigQuery", (
+            f"Checking and saving {count('unique')} unique jobs..."
+            if type(fields.get("unique")) is int
+            else "Checking and saving jobs..."
+        )
+    if event == "ingestion.recovery.started":
+        return "Recovery", "Checking recovery..."
+    if event == "ingestion.pubsub.started":
+        return "Pub/Sub", "Publishing jobs..."
+    if event == "ingestion.cancelled":
+        summary = "Ingestion cancelled"
+        if fields.get("persistence_outcome") == "unconfirmed":
+            summary += "; persistence unconfirmed, stored row count unknown"
+        elif fields.get("reason") == "publication_confirmation_incomplete":
+            summary += "; publication confirmation incomplete"
+        return label, summary
     if event == "ingestion.dataset.verified":
         return "Apify", (
             "Run and dataset verified"
@@ -222,6 +254,11 @@ def _compact_summary(fields: dict[str, object]) -> tuple[str, str]:
         return "Recovery", f"Recovery check failed: {fields.get('error_type') or 'unknown error'}"
     if event == "ingestion.pubsub.completed":
         return "Pub/Sub", f"{count('published')} published, {count('publish_failures')} failed"
+    if event == "ingestion.publication.deferred":
+        return "Pub/Sub", (
+            f"Publication pending or held: {count('publication_pending')} pending, "
+            f"{count('publication_in_flight')} in flight, {count('publication_unknown')} unknown"
+        )
     if event == "ingestion.pubsub.publish_unconfirmed":
         return "Pub/Sub", f"Publication unconfirmed: {fields.get('error_type') or 'unknown error'}"
     if event == "ingestion.completed":
@@ -282,13 +319,7 @@ class _CompactConsoleFilter(logging.Filter):
             "ingestion.authentication.skipped",
             "ingestion.event.validated",
             "ingestion.actor.authorized",
-            "ingestion.actor.verification_started",
             "ingestion.actor.verified",
-            "ingestion.dataset.fetch_started",
-            "ingestion.normalization.started",
-            "ingestion.bigquery.started",
-            "ingestion.recovery.started",
-            "ingestion.pubsub.started",
         }
 
 
@@ -319,6 +350,12 @@ class IngestionFormatter(logging.Formatter):
         severity = "WARN" if record.levelno == logging.WARNING else str(fields["severity"])
         if not self.verbose:
             label, summary = _compact_summary(fields)
+            if (
+                record.levelno >= logging.WARNING
+                and fields.get("reason")
+                and str(fields.get("event")).endswith((".started", "_started"))
+            ):
+                summary += f" — {fields['reason']}"
             timed_events = {
                 "ingestion.dataset.fetched",
                 "ingestion.normalization.completed",
@@ -327,6 +364,8 @@ class IngestionFormatter(logging.Formatter):
                 "ingestion.pubsub.completed",
                 "ingestion.completed",
                 "ingestion.failed",
+                "ingestion.ignored",
+                "ingestion.cancelled",
             }
             if fields.get("event") in timed_events:
                 summary += f" ({fields['duration_ms'] / 1000:.2f}s)"

@@ -10,6 +10,7 @@ ARCHITECTURE.md: "calls text-embedding-004 on f'{title} {company} {location} {de
 from __future__ import annotations
 
 import base64
+import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
@@ -23,6 +24,8 @@ from observability.setup import setup_observability
 from repositories.embeddings_repo import EmbeddingRepository
 from repositories.raw_jobs_repo import RawJobRepository
 from schemas.job_models import JobStatus, RawJob
+from schemas.publication_models import QueryOutcomeUnconfirmed
+from observability.ingestion_logging import emit
 
 logger = logging.getLogger(__name__)
 
@@ -69,11 +72,24 @@ async def pubsub_push(request: Request) -> None:
         # Return 200 to ack and discard malformed messages
         return
 
-    await _process_job(job_id)
+    if get_settings().publication_ledger_enabled:
+        try:
+            if not isinstance(job_id, str) or not job_id.strip():
+                raise ValueError("Invalid job identifier")
+            await _process_job(job_id)
+        except Exception as exc:
+            emit("embedding.processing.retry", logging.WARNING, error_type=type(exc).__name__)
+            return JSONResponse(
+                status_code=503, content={"detail": "Processing incomplete; retry delivery"}
+            )
+    else:
+        await _process_job(job_id)
 
 
 async def _process_job(job_id: str) -> None:
     """Fetch job, generate embedding, write to BQ."""
+    if get_settings().publication_ledger_enabled:
+        return await _process_job_with_claim(job_id)
     raw_repo = RawJobRepository()
     emb_repo = EmbeddingRepository()
 
@@ -105,6 +121,53 @@ async def _process_job(job_id: str) -> None:
         raise
 
 
+async def _process_job_with_claim(
+    job_id: str, *, raw_repo=None, emb_repo=None, publications=None
+) -> None:
+    """Concurrent duplicates retry; completed duplicates skip. No publication-state resets."""
+    from repositories.publications_repo import PublicationRepository
+
+    settings = get_settings()
+    raw_repo = raw_repo if raw_repo is not None else RawJobRepository(settings=settings)
+    emb_repo = emb_repo if emb_repo is not None else EmbeddingRepository()
+    publications = (
+        publications if publications is not None else PublicationRepository(settings=settings)
+    )
+    job = await raw_repo.get_job(job_id)
+    if job is None:
+        raise ValueError("Stored job is missing")
+    if job.status not in (JobStatus.NEW_RAW, JobStatus.EMBEDDING_QUEUED):
+        return
+    claim = await publications.claim_processing(job_id)
+    if claim.completed:
+        return
+    try:
+        # initial_embedding_v1 has one artifact per canonical job. Recovery after an
+        # older nontransactional worker write can reuse that artifact without paying again.
+        embedding = await emb_repo.get_embedding(job_id)
+        if embedding is None:
+            embedding = await asyncio.wait_for(
+                generate_embedding(_build_embedding_text(job)),
+                timeout=min(
+                    settings.publication_worker_timeout_seconds,
+                    settings.publication_lease_seconds / 2,
+                ),
+            )
+        await publications.finish_processing(claim, embedding)
+        emit("embedding.processing.completed")
+    except (asyncio.CancelledError, TimeoutError, QueryOutcomeUnconfirmed):
+        # Provider/query work can still be running remotely. Preserve its lease;
+        # immediate release would invite concurrent paid work or a stale commit.
+        raise
+    except Exception:
+        try:
+            await publications.release_processing(claim)
+        except Exception:
+            emit("embedding.processing.release_unconfirmed", logging.WARNING)
+        raise
+
+
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run("services.embedding_worker:app", host="0.0.0.0", port=8080, workers=1)

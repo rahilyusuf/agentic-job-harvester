@@ -97,6 +97,17 @@ async def test_success_summary_and_stage_durations(ingestion, caplog):
     assert len({record["request_id"] for record in records}) == 1
     assert final["subscriber_processing"] == "not_observed"
     assert final["source_run_status"] == ingestion[0]["status"]
+    names = [r["event"] for r in records]
+    for started, completed in (
+        ("ingestion.actor.verification_started", "ingestion.actor.verified"),
+        ("ingestion.dataset.fetch_started", "ingestion.dataset.fetched"),
+        ("ingestion.normalization.started", "ingestion.normalization.completed"),
+        ("ingestion.bigquery.started", "ingestion.bigquery.completed"),
+        ("ingestion.recovery.started", "ingestion.recovery.completed"),
+        ("ingestion.pubsub.started", "ingestion.pubsub.completed"),
+    ):
+        assert names.index(started) < names.index(completed)
+    assert len([name for name in names if name in TERMINAL_EVENTS]) == 1
     aborted = [record for record in records if record["event"] == "ingestion.actor.aborted"]
     assert len(aborted) == int(ingestion[0]["status"] == "ABORTED")
     if aborted:
@@ -791,7 +802,7 @@ def test_console_compaction_does_not_suppress_full_file_capture(level, verbose):
         )
         lines = output.getvalue().splitlines()
         headers = [line for line in lines if line and not line.startswith("    ")]
-        assert len(headers) == (7 if verbose else 4)
+        assert len(headers) == (7 if verbose else 5)
         assert ("\n\n" in output.getvalue()) is verbose
         assert ("ingestion.authentication.verified" in output.getvalue()) is verbose
         assert (state.request_id in output.getvalue()) is verbose
@@ -820,3 +831,181 @@ def test_verbose_console_separates_headers_and_wraps_metadata():
     assert record.event_fields == original
     production = IngestionFormatter(None, development=False, verbose=True).format(record)
     assert "\n" not in production and json.loads(production) == original
+
+
+TERMINAL_EVENTS = {
+    "ingestion.completed",
+    "ingestion.failed",
+    "ingestion.ignored",
+    "ingestion.cancelled",
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("event", 42),
+        ("event", True),
+        ("event", ["unsupported"]),
+        ("event", {"unexpected": "METADATA_SECRET_CANARY"}),
+        ("event", "ACTOR.RUN.FAILED"),
+        ("status", 42),
+        ("status", True),
+        ("status", False),
+        ("status", 0),
+        ("status", None),
+        ("status", ["unsupported"]),
+        ("status", {"unexpected": "METADATA_SECRET_CANARY"}),
+        ("status", "RUNNING"),
+    ],
+)
+async def test_ignored_metadata_has_one_terminal_event_without_changing_response(
+    ingestion, monkeypatch, caplog, field, value
+):
+    resource, _, repo, verify, fetch, publish = ingestion
+    payload = {"eventType": f"ACTOR.RUN.{resource['status']}", "resource": dict(resource)}
+    if field == "event":
+        payload["eventType"] = value
+        message = (
+            f"Event type '{value}' ignored; only ACTOR.RUN.SUCCEEDED "
+            "and enabled ACTOR.RUN.ABORTED events are processed."
+        )
+    else:
+        payload["resource"]["status"] = value
+        message = f"Actor run status '{value}' is not {resource['status']}; skipped."
+    monkeypatch.setattr(receiver, "perf_counter", lambda: context().started + 2.5)
+    response = await receiver.apify_webhook(_build_mock_request(payload))
+    assert response == {"received": value, "inserted": 0, "published": 0, "message": message}
+    terminal = [r for r in events(caplog) if r["event"] in TERMINAL_EVENTS]
+    assert len(terminal) == 1 and terminal[0]["event"] == "ingestion.ignored"
+    assert terminal[0]["outcome"] == "ignored" and terminal[0]["duration_ms"] == 2500
+    assert terminal[0]["received"] is None  # Event/status values are not record counts.
+    verify.assert_not_awaited()
+    fetch.assert_not_awaited()
+    repo.batch_insert_jobs.assert_not_awaited()
+    publish.assert_not_awaited()
+    assert context() is None and "METADATA_SECRET_CANARY" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [None, False, 0, "", [], {}])
+async def test_falsy_event_type_preserves_existing_rejection(ingestion, caplog, value):
+    with pytest.raises(receiver.HTTPException) as error:
+        await receiver.apify_webhook(_build_mock_request({"eventType": value}))
+    assert error.value.status_code == 422
+    terminal = [r for r in events(caplog) if r["event"] in TERMINAL_EVENTS]
+    assert len(terminal) == 1 and terminal[0]["event"] == "ingestion.failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "operation,stage",
+    [
+        ("verify", "actor_verification"),
+        ("fetch", "dataset_fetch"),
+        ("insert", "bigquery"),
+        ("recover", "recovery"),
+        ("publish", "pubsub"),
+    ],
+)
+async def test_cancellation_logs_once_and_propagates(ingestion, caplog, operation, stage):
+    _, _, repo, verify, fetch, publish = ingestion
+    cancelled = asyncio.CancelledError("CANCELLATION_SECRET_CANARY")
+    if operation == "recover":
+        repo.batch_insert_jobs.side_effect = None
+        repo.batch_insert_jobs.return_value = []
+    target = {
+        "verify": verify,
+        "fetch": fetch,
+        "insert": repo.batch_insert_jobs,
+        "recover": repo.get_unembedded_job_ids,
+        "publish": publish,
+    }[operation]
+    target.side_effect = cancelled
+    with pytest.raises(asyncio.CancelledError) as caught:
+        await invoke(ingestion)
+    assert caught.value is cancelled
+    terminal = [r for r in events(caplog) if r["event"] in TERMINAL_EVENTS]
+    assert len(terminal) == 1
+    final = terminal[0]
+    assert final["event"] == "ingestion.cancelled" and final["severity"] == "WARNING"
+    assert final["outcome"] == "cancelled" and final["stage"] == stage
+    assert final["duration_ms"] >= 0 and final["error_type"] == "CancelledError"
+    assert final["published"] is None and final["publish_failures"] is None
+    assert "status_code" not in final
+    if operation in ("verify", "fetch", "insert"):
+        assert final["inserted"] is None
+    if operation == "verify":
+        fetch.assert_not_awaited()
+    if operation in ("verify", "fetch"):
+        repo.batch_insert_jobs.assert_not_awaited()
+    if operation == "insert":
+        assert final["persistence_outcome"] == "unconfirmed"
+        repo.get_unembedded_job_ids.assert_not_awaited()
+    if operation == "publish":
+        assert final["inserted"] == 1
+        assert final["reason"] == "publication_confirmation_incomplete"
+    else:
+        publish.assert_not_awaited()
+    assert context() is None and "CANCELLATION_SECRET_CANARY" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("items", [[], [None, {}]])
+async def test_early_exit_has_no_fabricated_stage_execution(ingestion, caplog, items):
+    ingestion[4].return_value = items
+    await invoke(ingestion)
+    names = [r["event"] for r in events(caplog)]
+    assert ("ingestion.normalization.started" in names) is bool(items)
+    for name in ("bigquery", "recovery", "pubsub"):
+        assert f"ingestion.{name}.started" not in names
+    assert [name for name in names if name in TERMINAL_EVENTS] == ["ingestion.completed"]
+
+
+def test_compact_info_shows_long_stage_starts_and_cancellation():
+    output = io.StringIO()
+    handler = logging.StreamHandler(output)
+    root = logging.getLogger()
+    root.addHandler(handler)
+    try:
+        restore = configure_ingestion_logging(environment="development", level="INFO")
+        try:
+            with request_context(None) as state:
+                for event, fields in (
+                    ("ingestion.actor.verification_started", {}),
+                    ("ingestion.dataset.fetch_started", {}),
+                    ("ingestion.normalization.started", {"received": 215}),
+                    ("ingestion.bigquery.started", {"unique": 113}),
+                    ("ingestion.recovery.started", {}),
+                    ("ingestion.pubsub.started", {}),
+                ):
+                    emit(event, **fields)
+                state.stage = "bigquery"
+                emit(
+                    "ingestion.cancelled",
+                    logging.WARNING,
+                    outcome="cancelled",
+                    persistence_outcome="unconfirmed",
+                )
+        finally:
+            restore()
+        text = output.getvalue()
+        expected = [
+            "[Apify] Verifying run...",
+            "[Fetch] Fetching dataset...",
+            "[Normalize] Normalizing and deduplicating 215 records...",
+            "[BigQuery] Checking and saving 113 unique jobs...",
+            "[Recovery] Checking recovery...",
+            "[Pub/Sub] Publishing jobs...",
+            "[BigQuery] Ingestion cancelled; persistence unconfirmed, stored row count unknown",
+        ]
+        assert len(text.splitlines()) == 7
+        assert [text.index(part) for part in expected] == sorted(
+            text.index(part) for part in expected
+        )
+        assert f"[{state.request_id[:8]}]" in text
+        assert "[Worker]" not in text
+    finally:
+        root.removeHandler(handler)
+        handler.close()
