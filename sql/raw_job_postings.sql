@@ -28,9 +28,11 @@ OPTIONS (
     partition_expiration_days = 365
 );
 
--- Prevent duplicate job_ids within the dedup window
--- Note: BQ does not support unique constraints natively;
--- dedup logic is enforced in repositories/raw_jobs_repo.py::exists().
+-- job_id identifies a logical posting across all retained history, not ninety days.
+-- BigQuery does not enforce uniqueness. The opt-in publication-ledger transaction
+-- guards raw insertion and retains identity after raw partition expiration.
+-- Legacy streaming checks all retained IDs but remains best-effort under concurrency.
+-- Ninety days is a freshness/discovery concept; recrawls do not overwrite content.
 
 -- Index hint: cluster on (status, company) for efficient status transitions
 -- and company-level lookups by CompanyResearchAgent.

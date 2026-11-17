@@ -60,7 +60,7 @@ class RawJobRepository:
         return RawJob.model_validate(data)
 
     async def insert_job(self, job: RawJob) -> None:
-        """Insert a new job. Skips silently if duplicate within dedup window."""
+        """Insert a new job. Skips an existing retained job ID regardless of age."""
         if self.publications is not None:
             result = await self.persist_jobs([job])
             if result.unconfirmed_ids or result.rejected_ids:
@@ -103,7 +103,7 @@ class RawJobRepository:
         """Guarded DML: raw rows and publication intentions commit atomically.
 
         Existing rows without a ledger are legacy UNKNOWN, never assumed unpublished.
-        The initial-embedding publication identity deliberately outlives raw dedup windows.
+        Ledger identity survives raw retention; recrawls never replace original content.
         """
         if self.publications is None:
             raise RuntimeError("Publication ledger is not enabled")
@@ -129,11 +129,16 @@ class RawJobRepository:
             FROM UNNEST(JSON_QUERY_ARRAY(@jobs)) item;
         ASSERT NOT EXISTS (
             SELECT r.job_id FROM `{self._table}` r JOIN incoming i ON r.job_id=i.job_id
-            WHERE r.scraped_at>=@window GROUP BY r.job_id HAVING COUNT(*)>1
+            GROUP BY r.job_id HAVING COUNT(*)>1
         ) AS 'Ambiguous existing raw jobs';
+        ASSERT NOT EXISTS (
+            SELECT 1 FROM incoming i WHERE
+            EXISTS (SELECT 1 FROM `{ledger.table}` p WHERE p.job_id=i.job_id)
+            AND NOT EXISTS (SELECT 1 FROM `{self._table}` r WHERE r.job_id=i.job_id)
+        ) AS 'Retained identity has no raw job';
         CREATE TEMP TABLE novel AS SELECT i.* FROM incoming i WHERE NOT EXISTS (
-            SELECT 1 FROM `{self._table}` r WHERE r.job_id=i.job_id AND r.scraped_at>=@window
-        );
+            SELECT 1 FROM `{self._table}` r WHERE r.job_id=i.job_id
+        ) AND NOT EXISTS (SELECT 1 FROM `{ledger.table}` p WHERE p.job_id=i.job_id);
         INSERT `{self._table}` ({", ".join(columns)}) SELECT {", ".join(columns)} FROM novel;
         INSERT `{ledger.table}` (publication_id,job_id,topic,processing_version,state,
             created_at,updated_at,attempt_count,last_error_code)
@@ -154,9 +159,6 @@ class RawJobRepository:
                 ledger.parameters(
                     bigquery.ScalarQueryParameter(
                         "jobs", "STRING", json.dumps([j.model_dump(mode="json") for j in jobs])
-                    ),
-                    bigquery.ScalarQueryParameter(
-                        "window", "TIMESTAMP", get_dedup_window_start(self._dedup_window_days)
                     ),
                 ),
             )
@@ -180,11 +182,9 @@ class RawJobRepository:
 
         # Check all job_ids in one BQ query using array parameter
         ids = [j.job_id for j in jobs]
-        window_start = format_bq_timestamp(get_dedup_window_start(self._dedup_window_days))
         query = f"""
             SELECT job_id FROM `{self._table}`
             WHERE job_id IN UNNEST(@ids)
-              AND scraped_at >= '{window_start}'
         """
         job_config = bigquery.QueryJobConfig(
             query_parameters=[
@@ -220,12 +220,10 @@ class RawJobRepository:
         return novel_ids
 
     async def exists(self, job_id: str) -> bool:
-        """Check if job_id exists within the 90-day dedup window."""
-        window_start = format_bq_timestamp(get_dedup_window_start())
+        """Check all retained raw rows, independently of freshness."""
         query = f"""
             SELECT COUNT(1) as cnt FROM `{self._table}`
             WHERE job_id = @job_id
-              AND scraped_at >= '{window_start}'
             LIMIT 1
         """
         rows = list(
@@ -263,7 +261,7 @@ class RawJobRepository:
         query = f"""
             SELECT * FROM `{self._table}`
             WHERE job_id = @job_id
-            LIMIT 1
+            LIMIT 2
         """
         rows = list(
             self._client.query_and_wait(
@@ -273,6 +271,8 @@ class RawJobRepository:
                 ),
             )
         )
+        if len(rows) > 1:
+            raise ValueError("Ambiguous raw job identity")
         return self._row_to_raw_job(rows[0]) if rows else None
 
     async def get_jobs_pending_embedding(self, limit: int = 100) -> list[RawJob]:

@@ -16,7 +16,9 @@ from typing import Protocol, runtime_checkable
 from schemas.job_models import EvaluatedJob, RawJob
 from schemas.profile_models import UserProfile
 from schemas.scoring_models import ScorerOutput, SkepticOutput
-from schemas.publication_models import BatchInsertResult, PublicationClaim, ProcessingClaim
+from schemas.publication_models import (
+    BatchInsertResult, CheckpointResult, PublicationClaim, PublicationOwnership, ProcessingClaim,
+)
 
 
 # ── Raw Jobs ───────────────────────────────────────────────────────────────────
@@ -27,7 +29,7 @@ class IRawJobRepository(Protocol):
     """Protocol for raw_job_postings table access."""
 
     async def insert_job(self, job: RawJob) -> None:
-        """Insert a new job record. No-op if job_id already exists within dedup window."""
+        """Insert a new job record. No-op for an existing retained job ID, independently of age."""
         ...
 
     async def batch_insert_jobs(self, jobs: list[RawJob]) -> list[str]:
@@ -39,7 +41,7 @@ class IRawJobRepository(Protocol):
         ...
 
     async def exists(self, job_id: str) -> bool:
-        """Check if a job_id exists within the 90-day dedup window."""
+        """Check if a job_id exists among all retained raw rows."""
         ...
 
     async def update_status(self, job_id: str, status: str) -> None:
@@ -61,11 +63,16 @@ class IRawJobRepository(Protocol):
 class IPublicationRepository(Protocol):
     async def publication_counts(self, job_ids: list[str]) -> dict[str, int]: ...
     async def claim_pending(
-        self, job_ids: list[str] | None = None, limit: int = 100, min_age_seconds: int = 0
+        self, job_ids: list[str] | None = None, limit: int = 100, min_age_seconds: int = 0,
+        *, deadline: float | None = None,
     ) -> list[PublicationClaim]: ...
+    async def check_ownership(
+        self, claims: list[PublicationClaim], *, deadline: float | None = None,
+    ) -> list[PublicationOwnership]: ...
     async def record_outcomes(
-        self, claims: list[PublicationClaim], confirmed: dict[str, str], unconfirmed_ids: list[str]
-    ) -> None: ...
+        self, claims: list[PublicationClaim], confirmed: dict[str, str], unconfirmed_ids: list[str],
+        *, deadline: float | None = None,
+    ) -> CheckpointResult: ...
     async def claim_processing(self, job_id: str) -> ProcessingClaim: ...
     async def finish_processing(self, claim: ProcessingClaim, embedding: list[float]) -> None: ...
     async def release_processing(self, claim: ProcessingClaim) -> None: ...

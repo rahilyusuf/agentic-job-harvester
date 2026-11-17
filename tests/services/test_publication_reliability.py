@@ -3,6 +3,7 @@
 import asyncio
 import json
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -14,6 +15,10 @@ from repositories.publications_repo import PublicationRepository
 from repositories.raw_jobs_repo import RawJobRepository
 from schemas.publication_models import (
     BatchInsertResult,
+    CheckpointResult,
+    PublicationOwnership,
+    QueryFailed,
+    QueryTransactionAborted,
     ProcessingBusy,
     ProcessingClaim,
     ProcessingLeaseLost,
@@ -50,17 +55,21 @@ class MemoryLedger:
         self.completed = set()
         self.processing = {}
         self.artifacts = {}
+        self.checkpoints = []
 
     def add(self, job_id, state="PENDING"):
         self.rows[job_id] = dict(state=state, until=0, token=None, attempts=0, message=None)
 
-    async def claim_pending(self, job_ids=None, limit=100, min_age_seconds=0):
+    async def claim_pending(self, job_ids=None, limit=100, min_age_seconds=0, *, deadline=None):
         async with self.lock:
             claims = []
             for job_id, row in sorted(self.rows.items()):
                 if job_ids is not None and job_id not in job_ids:
                     continue
                 if row["state"] in ("PUBLISHED", "UNKNOWN") or row["until"] > self.now:
+                    continue
+                if row["attempts"] >= 5:
+                    row["state"] = "UNKNOWN"
                     continue
                 token = f"token-{row['attempts']}"
                 row.update(
@@ -70,23 +79,51 @@ class MemoryLedger:
                     attempts=row["attempts"] + 1,
                 )
                 claims.append(
-                    PublicationClaim(publication_id=job_id, job_id=job_id, lease_token=token)
+                    PublicationClaim(
+                        publication_id=job_id, job_id=job_id, lease_token=token,
+                        lease_expires_at=datetime.fromtimestamp(row["until"], timezone.utc),
+                    )
                 )
                 if len(claims) == limit:
                     break
             return claims
 
-    async def record_outcomes(self, claims, confirmed, unconfirmed_ids):
+    async def check_ownership(self, claims, *, deadline=None):
+        return [
+            PublicationOwnership(
+                **{**c.model_dump(), "lease_expires_at": datetime.fromtimestamp(
+                    self.rows[c.job_id]["until"], timezone.utc)},
+                server_now=datetime.fromtimestamp(self.now, timezone.utc),
+            ) for c in claims if self.rows[c.job_id]["token"] == c.lease_token
+            and self.rows[c.job_id]["until"] > self.now
+            and self.rows[c.job_id]["state"] == "IN_FLIGHT"
+        ]
+
+    async def record_outcomes(self, claims, confirmed, unconfirmed_ids, *, deadline=None):
         if self.checkpoint_fails:
             raise QueryOutcomeUnconfirmed("checkpoint")
+        self.checkpoints.append([c.job_id for c in claims])
+        saved, lost = [], []
         async with self.lock:
             for claim in claims:
                 row = self.rows[claim.job_id]
-                assert row["token"] == claim.lease_token
+                if (row["state"] == "PUBLISHED" and row["message"] is not None
+                    and row["message"] == confirmed.get(claim.job_id)):
+                    saved.append(claim.job_id)
+                    continue
+                if (row["token"] != claim.lease_token or row["until"] <= self.now
+                    or row["state"] != "IN_FLIGHT"):
+                    lost.append(claim.job_id)
+                    continue
                 row["state"] = "PUBLISHED" if claim.job_id in confirmed else "PENDING"
                 row["message"] = confirmed.get(claim.job_id)
+                row["token"] = None
                 if claim.job_id in confirmed:
                     row["until"] = 0
+                else:
+                    row["until"] = max(row["until"], self.now + 60)
+                saved.append(claim.job_id)
+        return CheckpointResult(checkpointed_ids=saved, lease_lost_ids=lost)
 
     async def publication_counts(self, job_ids):
         counts = {}
@@ -131,6 +168,8 @@ class MemoryRaw:
                     if job.job_id not in self.publications.rows:
                         self.publications.add(job.job_id, "UNKNOWN")
                 else:
+                    if job.job_id in self.publications.rows:
+                        raise ValueError("Retained identity has no raw job")
                     inserted.append(job.job_id)
                     self.jobs[job.job_id] = job
                     self.publications.add(job.job_id)
@@ -444,8 +483,12 @@ def test_evidence_first_manifest_never_invents_confirmation():
         ("configured", "Bearer configured", 200),
     ],
 )
-async def test_reconciliation_requires_explicit_authorization(monkeypatch, secret, header, status):
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_reconciliation_requires_explicit_authorization(
+    monkeypatch, secret, header, status, enabled,
+):
     configured = settings()
+    configured.publication_ledger_enabled = enabled
     configured.reconciliation_secret = secret
     monkeypatch.setattr(apify_receiver, "get_settings", lambda: configured)
     reconcile = AsyncMock(
@@ -489,7 +532,10 @@ async def test_unknown_existing_jobs_are_logged_as_held_not_success(full_batch):
 @pytest.mark.asyncio
 async def test_duplicate_claim_set_never_reaches_publisher():
     repo = MagicMock()
-    claim = PublicationClaim(publication_id="key", job_id="job", lease_token="token")
+    claim = PublicationClaim(
+        publication_id="key", job_id="job", lease_token="token",
+        lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=1800),
+    )
     repo.claim_pending = AsyncMock(return_value=[claim, claim])
     publish = AsyncMock()
     with pytest.raises(ValueError):
@@ -624,3 +670,422 @@ def test_manifest_requires_explicit_boolean_and_timezone():
     ):
         with pytest.raises(ValueError):
             build_manifest(jobs, [{**proof, **invalid}], topic=topic, expected_count=1)
+
+
+@pytest.mark.asyncio
+async def test_checkpoints_are_bounded_and_isolate_one_lost_lease():
+    ledger = MemoryLedger()
+    for i in range(23):
+        ledger.add(f"job-{i:02}")
+
+    async def publish(job_id):
+        if job_id == "job-09":
+            ledger.rows["job-00"]["token"] = "new-owner"
+        return f"ack-{job_id}"
+
+    result = await dispatch_pending(ledger, project_id="p", topic="t", publish_one=publish)
+    assert list(map(len, ledger.checkpoints)) == [10, 10, 3]
+    assert len(result.confirmed) == 22 and result.unconfirmed_ids == ["job-00"]
+    assert ledger.rows["job-00"]["state"] == "IN_FLIGHT"
+    assert ledger.rows["job-01"]["state"] == "PUBLISHED"
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_is_idempotent_for_the_same_confirmation():
+    ledger = MemoryLedger()
+    ledger.add("job")
+    claims = await ledger.claim_pending()
+    first = await ledger.record_outcomes(claims, {"job": "ack"}, [])
+    second = await ledger.record_outcomes(claims, {"job": "ack"}, [])
+    other = await ledger.record_outcomes(claims, {"job": "different-ack"}, [])
+    assert first == second == CheckpointResult(checkpointed_ids=["job"])
+    assert other.lease_lost_ids == ["job"]
+    assert ledger.rows["job"]["message"] == "ack"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("days", [89, 91, 366])
+async def test_recrawls_preserve_original_content_and_identity(days):
+    ledger = MemoryLedger()
+    raw = MemoryRaw(ledger)
+    original = _make_dummy_job("job")
+    await raw.persist_jobs([original])
+    ledger.rows["job"]["state"] = "PUBLISHED"
+    recrawl = original.model_copy(update={
+        "title": "Changed title", "scraped_at": original.scraped_at + timedelta(days=days),
+    })
+    result = await raw.persist_jobs([recrawl])
+    assert result.existing_ids == ["job"] and not result.inserted_ids
+    assert raw.jobs["job"] == original and ledger.rows["job"]["state"] == "PUBLISHED"
+    send = AsyncMock()
+    await dispatch_pending(ledger, project_id="p", topic="t", publish_one=send)
+    send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_retained_identity_without_raw_row_is_not_restored():
+    ledger = MemoryLedger()
+    ledger.add("job", "PUBLISHED")
+    raw = MemoryRaw(ledger)
+    with pytest.raises(ValueError, match="Retained identity"):
+        await raw.persist_jobs([_make_dummy_job("job")])
+    assert not raw.jobs and ledger.rows["job"]["state"] == "PUBLISHED"
+
+
+@pytest.mark.asyncio
+async def test_identity_queries_have_no_freshness_cutoff_and_reads_reject_duplicates():
+    client = MagicMock()
+    client.query.return_value.result.return_value = [{"job_id": "job", "inserted": False}]
+    repo = RawJobRepository(bq_client=client, settings=settings())
+    await repo.persist_jobs([_make_dummy_job("job")])
+    sql = client.query.call_args.args[0]
+    assert "@window" not in sql and "scraped_at>=" not in sql
+    assert "Retained identity has no raw job" in sql
+    assert "HAVING COUNT(*)>1" in sql
+    assert "p.job_id=i.job_id" in sql
+    assert "UPDATE `test-project.test_dataset.raw_job_postings`" not in sql
+    client.query_and_wait.return_value = [MagicMock(), MagicMock()]
+    with pytest.raises(ValueError, match="Ambiguous raw job"):
+        await repo.get_job("job")
+    assert "LIMIT 2" in client.query_and_wait.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_disabled_flag_keeps_streaming_without_ledger_or_identity_window():
+    configured = settings().model_copy(update={"publication_ledger_enabled": False})
+    client = MagicMock()
+    client.query_and_wait.return_value = []
+    client.insert_rows_json.return_value = []
+    repo = RawJobRepository(bq_client=client, settings=configured)
+    assert repo.publications is None
+    assert await repo.batch_insert_jobs_once([_make_dummy_job("job")]) == ["job"]
+    assert "scraped_at" not in client.query_and_wait.call_args.args[0]
+    assert client.insert_rows_json.call_args.kwargs == {"retry": None}
+    client.query.assert_not_called()
+    client.query_and_wait.return_value = [MagicMock(cnt=1)]
+    assert await repo.exists("job")
+    assert "scraped_at" not in client.query_and_wait.call_args.args[0]
+    client.query_and_wait.return_value = []
+    await repo.get_unembedded_job_ids()
+    assert "scraped_at >=" in client.query_and_wait.call_args.args[0]
+
+
+def _failed_query(reason="invalidQuery", message="Transaction is aborted due to concurrent update"):
+    job = MagicMock(state="DONE", error_result={"reason": reason, "message": message})
+    job.result.side_effect = RuntimeError("PRIVATE")
+    return job
+
+
+@pytest.mark.asyncio
+async def test_confirmed_abort_retries_new_job_only_after_original_is_resolved():
+    client = MagicMock()
+    successful = MagicMock()
+    successful.result.return_value = [{"ok": True}]
+    client.query.side_effect = [RuntimeError("lost"), successful]
+    client.get_job.return_value = _failed_query()
+    repo = PublicationRepository(client, settings=settings())
+    with patch("repositories.publications_repo.asyncio.sleep", new_callable=AsyncMock):
+        assert await repo.execute("BEGIN TRANSACTION; COMMIT TRANSACTION;", []) == [{"ok": True}]
+    first, second = client.query.call_args_list
+    assert first.kwargs["job_id"] != second.kwargs["job_id"]
+    assert client.get_job.call_args.args[0] == first.kwargs["job_id"]
+    assert all(call.kwargs["job_retry"] is None for call in client.query.call_args_list)
+
+
+@pytest.mark.asyncio
+async def test_abort_retry_budget_and_permanent_or_postcommit_failures():
+    client = MagicMock()
+    client.query.side_effect = RuntimeError("PRIVATE")
+    client.get_job.return_value = _failed_query()
+    repo = PublicationRepository(client, settings=settings())
+    with patch("repositories.publications_repo.asyncio.sleep", new_callable=AsyncMock):
+        with pytest.raises(QueryTransactionAborted):
+            await repo.execute("BEGIN TRANSACTION; COMMIT TRANSACTION;", [])
+    assert client.query.call_count == 3
+    client.reset_mock()
+    client.get_job.return_value = _failed_query(message="Syntax error")
+    with pytest.raises(QueryFailed):
+        await repo.execute("SELECT broken", [])
+    assert client.query.call_count == 1
+    client.reset_mock()
+    with pytest.raises(QueryOutcomeUnconfirmed):
+        await repo.execute("BEGIN TRANSACTION; COMMIT TRANSACTION; SELECT broken", [])
+    assert client.query.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_sql_commits_valid_outcomes_without_batch_lease_assertion():
+    client = MagicMock()
+    client.query.return_value.result.return_value = [
+        {"job_id": "good", "checkpointed": True}, {"job_id": "stale", "checkpointed": False},
+    ]
+    repo = PublicationRepository(client, settings=settings())
+    claims = [PublicationClaim(
+        publication_id=i, job_id=i, lease_token="old",
+        lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=1800),
+    ) for i in ("good", "stale")]
+    result = await repo.record_outcomes(claims, {"good": "ack1", "stale": "ack2"}, [])
+    assert result == CheckpointResult(checkpointed_ids=["good"], lease_lost_ids=["stale"])
+    sql = client.query.call_args.args[0]
+    assert "ASSERT @@row_count" not in sql
+    assert "p.lease_token=o.token" in sql and "p.lease_expires_at>CURRENT_TIMESTAMP()" in sql
+    assert "p.message_id=o.message_id" in sql and "SELECT * FROM results" in sql
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_abort_retries_without_another_broker_send():
+    ledger = MemoryLedger()
+    ledger.add("job")
+    client = MagicMock()
+    success = MagicMock()
+    success.result.return_value = [{"job_id": "job", "checkpointed": True}]
+    client.query.side_effect = [RuntimeError("PRIVATE"), success]
+    client.get_job.return_value = _failed_query()
+    repo = PublicationRepository(client, settings=settings())
+    original = ledger.record_outcomes
+
+    async def checkpoint(claims, confirmed, unconfirmed_ids, **kwargs):
+        await repo.record_outcomes(claims, confirmed, unconfirmed_ids, **kwargs)
+        return await original(claims, confirmed, unconfirmed_ids, **kwargs)
+
+    ledger.record_outcomes = checkpoint
+    send = AsyncMock(return_value="ack")
+    with patch("repositories.publications_repo.asyncio.sleep", new_callable=AsyncMock):
+        result = await dispatch_pending(ledger, project_id="p", topic="t", publish_one=send)
+    assert result.confirmed == {"job": "ack"}
+    assert send.await_count == 1 and client.query.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_pause_during_ownership_check_prevents_any_send(monkeypatch):
+    from services import publication_dispatcher as dispatcher
+    ledger = MemoryLedger()
+    ledger.add("job")
+    now = [0.0]
+    original = ledger.check_ownership
+
+    async def paused(*args, **kwargs):
+        owners = await original(*args, **kwargs)
+        now[0] = 1801.0
+        return owners
+
+    ledger.check_ownership = paused
+    monkeypatch.setattr(dispatcher, "monotonic", lambda: now[0])
+    send = AsyncMock()
+    result = await dispatch_pending(ledger, project_id="p", topic="t", publish_one=send)
+    send.assert_not_awaited()
+    assert not result.attempted_ids and not ledger.checkpoints
+
+
+@pytest.mark.asyncio
+async def test_expired_or_reassigned_claims_are_not_sent():
+    ledger = MemoryLedger()
+    ledger.add("job")
+    original = ledger.check_ownership
+
+    async def reassigned(claims, **kwargs):
+        ledger.rows["job"]["token"] = "someone-else"
+        return await original(claims, **kwargs)
+
+    ledger.check_ownership = reassigned
+    send = AsyncMock()
+    await dispatch_pending(ledger, project_id="p", topic="t", publish_one=send)
+    send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_crash_after_first_checkpoint_preserves_earlier_confirmations():
+    ledger = MemoryLedger()
+    for i in range(20):
+        ledger.add(f"job-{i:02}")
+    original = ledger.record_outcomes
+
+    async def crash(claims, confirmed, unconfirmed_ids, **kwargs):
+        if len(ledger.checkpoints) == 1:
+            raise QueryOutcomeUnconfirmed("lost-second-checkpoint")
+        return await original(claims, confirmed, unconfirmed_ids, **kwargs)
+
+    ledger.record_outcomes = crash
+    send = AsyncMock(return_value="ack")
+    with pytest.raises(QueryOutcomeUnconfirmed):
+        await dispatch_pending(ledger, project_id="p", topic="t", publish_one=send)
+    assert sum(r["state"] == "PUBLISHED" for r in ledger.rows.values()) == 10
+    assert sum(r["state"] == "IN_FLIGHT" for r in ledger.rows.values()) == 10
+
+
+@pytest.mark.asyncio
+async def test_five_expired_claims_are_held_not_published_forever():
+    ledger = MemoryLedger()
+    ledger.add("job")
+    send = AsyncMock(side_effect=TimeoutError())
+    for _ in range(6):
+        await dispatch_pending(ledger, project_id="p", topic="t", publish_one=send)
+        ledger.now += 1801
+    assert ledger.rows["job"]["state"] == "UNKNOWN"
+    assert send.await_count == 5
+
+
+@pytest.mark.asyncio
+async def test_sdk_thread_rechecks_deadline_before_publish(monkeypatch):
+    from services import publication_dispatcher as dispatcher
+    ledger = MemoryLedger()
+    ledger.add("job")
+    publisher = MagicMock()
+    now = [0.0]
+    monkeypatch.setattr(dispatcher, "monotonic", lambda: now[0])
+    monkeypatch.setattr(dispatcher.pubsub_v1, "PublisherClient", lambda: publisher)
+
+    async def queued(call, *args):
+        if call.__name__ == "send":
+            now[0] = 2000.0  # Executor delay AFTER the event-loop lease check.
+        return call(*args)
+
+    monkeypatch.setattr(dispatcher.asyncio, "to_thread", queued)
+    result = await dispatch_pending(ledger, project_id="p", topic="t")
+    publisher.publish.assert_not_called()
+    assert not result.attempted_ids and not result.unconfirmed_ids
+    assert result.claimed_count == 1 and not ledger.checkpoints
+
+
+@pytest.mark.asyncio
+async def test_claim_count_keeps_later_pages_reachable_when_sends_are_skipped(monkeypatch):
+    from services import publication_dispatcher as dispatcher
+    ledger = MemoryLedger()
+    for i in range(113):
+        ledger.add(f"job-{i:03}")
+    # Lose the first page after claiming it; the next page must still be reached.
+    original = ledger.check_ownership
+
+    async def ownership(claims, **kwargs):
+        if claims[0].job_id < "job-100":
+            return []
+        return await original(claims, **kwargs)
+
+    ledger.check_ownership = ownership
+    real_dispatch = dispatcher.dispatch_pending
+    send = AsyncMock(return_value="ack")
+
+    async def dispatch(repository, **kwargs):
+        return await real_dispatch(repository, publish_one=send, **kwargs)
+
+    monkeypatch.setattr(dispatcher, "dispatch_pending", dispatch)
+    monkeypatch.setattr(apify_receiver, "get_settings", settings)
+    result = await apify_receiver.reconcile_unpublished_jobs(
+        repo=MagicMock(publications=ledger), limit=200,
+    )
+    assert result["published"] == 13 and send.await_count == 13
+    assert ledger.rows["job-000"]["state"] == "IN_FLIGHT"
+
+
+@pytest.mark.asyncio
+async def test_raw_sql_expressions_match_every_checked_in_field():
+    import re
+    from schemas.job_models import RawJob
+    client = MagicMock()
+    client.query.return_value.result.return_value = [{"job_id": "job", "inserted": True}]
+    repo = RawJobRepository(bq_client=client, settings=settings())
+    await repo.persist_jobs([_make_dummy_job("job")])
+    sql = client.query.call_args.args[0]
+    ddl = Path("sql/raw_job_postings.sql").read_text(encoding="utf-8")
+    fields = dict(re.findall(r"^\s+(\w+)\s+(STRING|TIMESTAMP)\b", ddl, re.MULTILINE))
+    assert set(fields) == set(RawJob.model_fields) and len(fields) == 13
+    for name, kind in fields.items():
+        value = f"JSON_VALUE(item,'$.{name}')"
+        if kind == "TIMESTAMP":
+            value = f"TIMESTAMP({value})"
+        assert f"{value} AS {name}" in sql
+
+
+@pytest.mark.asyncio
+async def test_preflight_adapter_checks_token_expiry_and_unique_raw_record():
+    repo = PublicationRepository(MagicMock(), settings=settings())
+    claim = PublicationClaim(
+        publication_id="pub", job_id="job", lease_token="token",
+        lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=1800),
+    )
+    repo.client.query.return_value.result.return_value = [{
+        **claim.model_dump(), "server_now": datetime.now(timezone.utc),
+    }]
+    assert (await repo.check_ownership([claim]))[0].job_id == "job"
+    sql = repo.client.query.call_args.args[0]
+    assert "p.lease_token=r.token" in sql and "p.lease_expires_at>CURRENT_TIMESTAMP()" in sql
+    assert "j.job_id=p.job_id)=1" in sql
+    assert "CURRENT_TIMESTAMP() AS server_now" in sql
+
+
+@pytest.mark.asyncio
+async def test_raw_transaction_abort_retries_without_streaming_or_blind_append():
+    client = MagicMock()
+    success = MagicMock()
+    success.result.return_value = [{"job_id": "job", "inserted": False}]
+    client.query.side_effect = [RuntimeError("PRIVATE"), success]
+    client.get_job.return_value = _failed_query()
+    repo = RawJobRepository(client, settings=settings())
+    with patch("repositories.publications_repo.asyncio.sleep", new_callable=AsyncMock):
+        result = await repo.persist_jobs([_make_dummy_job("job")])
+    assert result.existing_ids == ["job"] and not result.inserted_ids
+    assert client.query.call_count == 2
+    client.insert_rows_json.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_repeated_http_webhook_uses_full_fixture_without_republication(monkeypatch):
+    from services import ingestion_publications as ingestion
+    path = Path("Input/dataset_company-career-page-scraper_2026-09-17_06-15-27-909.json")
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
+    raw = MemoryRaw(MemoryLedger())
+    configured = settings()
+    configured.apify_api_token = "offline-token"
+    monkeypatch.setattr(apify_receiver, "get_settings", lambda: configured)
+    monkeypatch.setattr(apify_receiver, "_verify_actor_run", AsyncMock(return_value={
+        "id": "run", "actId": "actor", "status": "SUCCEEDED", "defaultDatasetId": "dataset",
+    }))
+    monkeypatch.setattr(apify_receiver, "_fetch_dataset_items", AsyncMock(return_value=data))
+    send = AsyncMock(return_value="ack")
+
+    async def dispatcher(repository, **kwargs):
+        return await dispatch_pending(repository, publish_one=send, **kwargs)
+
+    real_ingest = ingestion.ingest_with_publications
+
+    async def ingest(batch, **kwargs):
+        return await real_ingest(batch, repository=raw, dispatcher=dispatcher, **kwargs)
+
+    monkeypatch.setattr(ingestion, "ingest_with_publications", ingest)
+    payload = {"eventType": "ACTOR.RUN.SUCCEEDED", "resource": {
+        "id": "run", "actId": "actor", "status": "SUCCEEDED", "defaultDatasetId": "dataset",
+    }}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=apify_receiver.app), base_url="http://test",
+    ) as client:
+        first = await client.post("/webhook/apify", json=payload)
+        second = await client.post("/webhook/apify", json=payload)
+    assert first.status_code == second.status_code == 202
+    a, b = first.json(), second.json()
+    assert (a["received"], a["normalized"], a["unique"], a["in_batch_duplicates"]) == (215, 215, 113, 102)
+    assert a["inserted"] == a["published"] == 113
+    assert b["inserted"] == b["published"] == b["recovered"] == 0
+    assert len(raw.jobs) == send.await_count == 113 and set(a) == set(b)
+
+
+@pytest.mark.asyncio
+async def test_confirmed_identity_conflict_logs_only_a_safe_category(caplog):
+    client = MagicMock()
+    client.query.side_effect = RuntimeError("PRIVATE_PAYLOAD_CANARY")
+    client.get_job.return_value = _failed_query(
+        message="Query error: Retained identity has no raw job at [12:3]",
+    )
+    repo = RawJobRepository(client, settings=settings())
+    with pytest.raises(QueryFailed) as error:
+        await repo.persist_jobs([_make_dummy_job("job")])
+    assert error.value.category == "raw_identity_conflict"
+    events = [r.event_fields for r in caplog.records if hasattr(r, "event_fields")]
+    assert events[-1]["event"] == "ingestion.bigquery.failed"
+    assert events[-1]["error_category"] == "raw_identity_conflict"
+    assert "PRIVATE_PAYLOAD_CANARY" not in caplog.text
+    assert client.query.call_count == 1
+    client.insert_rows_json.assert_not_called()
+
+
+def test_publication_ledger_remains_disabled_by_default():
+    assert Settings.model_fields["publication_ledger_enabled"].default is False

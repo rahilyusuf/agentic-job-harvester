@@ -3,7 +3,7 @@
 import hashlib
 from enum import Enum
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AwareDatetime, BaseModel, Field, model_validator
 
 PROCESSING_VERSION = "initial_embedding_v1"
 
@@ -39,6 +39,23 @@ class PublicationClaim(BaseModel):
     publication_id: str = Field(min_length=1)
     job_id: str = Field(min_length=1)
     lease_token: str = Field(min_length=1)
+    lease_expires_at: AwareDatetime
+
+
+class PublicationOwnership(PublicationClaim):
+    server_now: AwareDatetime
+
+
+class CheckpointResult(BaseModel):
+    checkpointed_ids: list[str] = Field(default_factory=list)
+    lease_lost_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def distinct_ids(self):
+        ids = self.checkpointed_ids + self.lease_lost_ids
+        if len(ids) != len(set(ids)):
+            raise ValueError("Checkpoint outcomes must be unique and disjoint")
+        return self
 
 
 class ProcessingClaim(BaseModel):
@@ -49,6 +66,7 @@ class ProcessingClaim(BaseModel):
 
 
 class PublishResult(BaseModel):
+    claimed_count: int | None = Field(default=None, ge=0, le=100)
     attempted_ids: list[str] = Field(default_factory=list)
     confirmed: dict[str, str] = Field(default_factory=dict)
     unconfirmed_ids: list[str] = Field(default_factory=list)
@@ -56,6 +74,8 @@ class PublishResult(BaseModel):
     @model_validator(mode="after")
     def valid_outcomes(self):
         attempted = set(self.attempted_ids)
+        if self.claimed_count is not None and self.claimed_count < len(attempted):
+            raise ValueError("Attempts exceed claims")
         if len(attempted) != len(self.attempted_ids):
             raise ValueError("Duplicate publication attempt")
         if set(self.confirmed) & set(self.unconfirmed_ids):
@@ -73,6 +93,19 @@ class QueryOutcomeUnconfirmed(RuntimeError):
     def __init__(self, job_id: str):
         super().__init__("BigQuery query outcome unconfirmed")
         self.job_id = job_id
+
+
+class QueryFailed(RuntimeError):
+    """Confirmed permanent query failure; never automatically retry."""
+
+    def __init__(self, job_id: str, category: str = "query_failed"):
+        super().__init__("BigQuery query failed")
+        self.job_id = job_id
+        self.category = category
+
+
+class QueryTransactionAborted(QueryFailed):
+    """Original terminal query proves rollback; a fresh transaction is safe."""
 
 
 class ProcessingBusy(RuntimeError):

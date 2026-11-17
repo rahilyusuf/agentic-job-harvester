@@ -690,7 +690,12 @@ async def reconcile_unpublished_jobs(
             reconciled += len(result.attempted_ids)
             published += len(result.confirmed)
             failures += len(result.unconfirmed_ids)
-            if len(result.attempted_ids) < min(100, limit - offset):
+            claimed_count = (
+                result.claimed_count
+                if result.claimed_count is not None
+                else len(result.attempted_ids)
+            )
+            if claimed_count < min(100, limit - offset):
                 break
         emit(
             "ingestion.recovery.completed",

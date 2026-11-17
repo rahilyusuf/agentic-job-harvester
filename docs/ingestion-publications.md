@@ -17,25 +17,51 @@ boundary. Do not write to the ledger using streaming inserts or bypass the adapt
 creates UNKNOWN and is held for review. PUBLISHED never becomes eligible solely because
 the raw row remains NEW_RAW. UNKNOWN never automatically republishes.
 
-Claims use server time, a token and a 30-minute default lease. The dispatcher handles
-at most 100 jobs per claim, waiting up to 10 seconds per publication. Unconfirmed
-attempts are deferred until at least the original lease expiry. Five attempts exhaust
-automatic recovery and hold the row UNKNOWN with `attempts_exhausted`. Confirmations
-store broker message IDs in a fenced batch update. A crash after acceptance and before
-checkpointing can still produce duplicate publication: this is **at least once**.
+Claims use server time, a token and a 30-minute default lease. Each dispatcher page
+contains at most 100 claims and checkpoints at most ten attempts at a time. Checkpoints
+save eligible outcomes independently: one lost lease cannot discard other confirmations.
+The same already-PUBLISHED message ID is an idempotent checkpoint success. Published
+counters mean durable confirmations, not merely successful broker RPCs.
+
+Before each group, ownership, expiry and raw-row uniqueness are checked against BigQuery.
+Server time produces a conservative monotonic deadline, rechecked inside the SDK thread
+before publishing. Sends require a ten-second RPC budget plus a thirty-second lease
+margin. Dispatch is bounded to 900 seconds; repository operations share the remaining
+budget and are capped at 120 seconds. Leases are not renewed automatically. Skipped
+claims expire normally and do not count as publication attempts. Pages advance by claim
+count, so skipped sends do not starve later pages.
+
+Unconfirmed attempts are deferred until at least the original lease expiry. Five claims
+exhaust automatic recovery and hold UNKNOWN with `attempts_exhausted`. Pauses between a
+final ownership check and actual broker acceptance cannot be fenced by BigQuery. A crash
+after acceptance and before checkpointing can still duplicate publication: **at least once**.
 
 BigQuery queries are submitted with a fixed job ID. On uncertain completion, the adapter
-resolves that same job, never blindly replays an append. Failed/conflicting transactions
-remain unconfirmed and return retryable errors; there is no tight transaction retry loop.
+resolves that same project/location/job ID, never blindly replays an append. Only an
+original terminal job proving a concurrent-update transaction abort permits a fresh
+transaction: at most three attempts, with jitter bounded by one then two seconds. A
+checkpoint retry reuses its tokens and broker message IDs without resending messages.
+A terminal script error alone does not prove rollback after a possible COMMIT. Unknown
+outcomes remain unconfirmed; permanent errors are not automatically retried. The three
+transaction attempts are distinct from the five publication-claim attempts.
 Reconciliation later drains due claims ordered by creation time and publication ID,
 so a successful 100-job page no longer starves a remaining 13-job page.
 
 Publication identity is SHA256 of full topic, canonical job ID, and
 `initial_embedding_v1`, separated by newlines. It is independent of webhook/run IDs
-and outlives the 90-day raw dedup window. This version means one initial artifact per
+and outlives raw retention. Identity checks have no 90-day cutoff; ninety days remains
+a freshness/discovery window. A recrawl never replaces original content, scraped_at,
+status, or publication evidence. Raw partitions still expire after 365 days, while ledger
+identity remains. A retained identity with no raw row fails closed for review rather than
+restoring a posting or publishing it again. This version means one initial artifact per
 canonical job. Future model/content refresh needs an explicit versioned artifact
 contract, not clearing PUBLISHED. Existing duplicate raw IDs are held for investigation;
-do not pick arbitrary versions for worker processing.
+do not pick arbitrary versions for worker processing. Duplicate-safe raw reads also reject
+multiple matches. Strict lifetime/concurrent-insert guarantees require the enabled ledger
+path for all writers. With the flag disabled, legacy streaming remains best-effort:
+identity checks cover all retained rows, but streaming races, partial writes, repeated
+NEW_RAW recovery publication, and forgetting IDs after raw expiry remain unresolved.
+Changing topics or processing versions is not an identity reset or a content-refresh policy.
 
 Workers acquire a separate processing token/lease. Busy delivery returns 503, completed
 delivery skips, and completion atomically writes the vector, raw status and completion
@@ -44,10 +70,14 @@ repair an older worker's write/status gap without calling the embedding provider
 Provider work is bounded by the smaller of 300 seconds and half the lease; a cancelled
 background SDK call might still finish remotely. This does not guarantee exactly-once
 paid computation after a crash or lease loss. No providers or model settings change.
+Embedding model/content provenance and artifact refresh remain a separate milestone;
+this publication correction does not establish that an old vector matches recrawled content.
 
 ## Evidence-first migration of the existing 113
 
-1. Stop legacy publication/reconciliation writers during the cutover; keep workers
+1. Audit raw duplicates across all retained partitions; stop on any ambiguity without
+   deleting, merging or changing historical rows. Stop legacy publication/reconciliation
+   writers during the cutover; keep workers
    disabled until reviewed. Do not mix legacy streaming writers with the new DML path.
 2. Review/apply `sql/job_publications.sql` separately. Verify dataset location, IAM,
    raw/vector table schemas and that old raw streaming buffers have drained before
@@ -74,7 +104,8 @@ paid computation after a crash or lease loss. No providers or model settings cha
 
 `RECONCILIATION_SECRET` must be explicitly configured before the HTTP reconciliation
 routes accept `Authorization: Bearer ...`; missing configuration returns 503 and
-invalid credentials 401. Limits are 1..1000 with pages no larger than 100. Verify Cloud
+invalid credentials 401, in both flag modes. This requirement is independent of webhook
+authentication: existing operator/Scheduler callers must provide this secret. Limits are 1..1000 with pages no larger than 100. Verify Cloud
 Run IAM separately; CORS is not authentication. Secrets and payloads are never logged.
 
 The test subscription is separate from any worker subscription. Publication evidence

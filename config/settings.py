@@ -129,7 +129,7 @@ class Settings(BaseSettings):
     )
 
     # ── Deduplication ─────────────────────────────────────────────────────────
-    dedup_window_days: int = Field(default=90, ge=1, le=365, description="BQ dedup window in days")
+    dedup_window_days: int = Field(default=90, ge=1, le=365, description="Freshness/recovery discovery window in days; not job identity")
 
     # ── Retrieval ─────────────────────────────────────────────────────────────
     vector_search_top_k: int = Field(

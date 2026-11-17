@@ -41,8 +41,10 @@ normalizes fields, handles apply-URL fallback, and sanitizes fields without prom
 wrappers before constructing `RawJob`. IDs use ATS identity where available or URL
 hash fallback; [utils/ids.py](utils/ids.py) owns identity helpers.
 
-[repositories/raw_jobs_repo.py](repositories/raw_jobs_repo.py) queries the dedupe
-window (default 90 days), inserts novel records as `NEW_RAW`, and returns inserted IDs.
+[repositories/raw_jobs_repo.py](repositories/raw_jobs_repo.py) checks all retained raw
+IDs, inserts novel records as `NEW_RAW`, and returns inserted IDs. Ninety days is a
+freshness/discovery window, not an identity reset. Legacy streaming remains vulnerable
+to concurrent inserts and cannot retain identity beyond raw-row expiration.
 The receiver publishes those IDs, plus existing `NEW_RAW` IDs recovered on webhook
 retry. `/reconcile` and `/jobs/reconcile` rediscover saved/unembedded jobs independently.
 Publication futures are resolved in an executor and failures are counted. This is
@@ -73,8 +75,17 @@ and processing claims are typed in `schemas/publication_models.py`.
 
 PENDING/IN_FLIGHT/PUBLISHED/UNKNOWN describe broker publication, not embedding readiness.
 Transactions serialize mutations through a no-op DELETE guard; leased claims and fenced
-checkpoints suppress routine republication. SDK query uncertainty is resolved through
-the same query job ID. Broker-acceptance/checkpoint crashes remain at-least-once.
+checkpoints suppress routine republication. Lifetime identity also consults the retained
+ledger across topics/versions; recrawls preserve original content and status. Missing raw
+rows behind a retained identity and duplicate raw IDs fail closed for review.
+
+The dispatcher checks ownership and raw-row uniqueness before each group, checks its
+monotonic lease budget before SDK submission, and checkpoints at most ten attempts.
+Valid outcomes commit independently of stale claims. SDK uncertainty is resolved through
+the same query job ID; only proven transaction aborts permit a bounded fresh transaction.
+Checkpoint retries do not resend messages. Publication counts require durable checkpoints.
+The dispatcher has a 900-second bound and never claims exactly-once publication:
+broker-acceptance/checkpoint crashes and final-check/send races remain at-least-once.
 The worker's opt-in claim commits vector persistence, raw status and processing completion
 together. Busy deliveries retry instead of ACKing incomplete work; completed duplicates
 skip. This is not a guarantee of exactly-once provider computation after crash/timeout.

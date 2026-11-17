@@ -84,3 +84,16 @@ def test_invalid_actions_repo_action_raises() -> None:
         asyncio.run(repo.record_action(
             job_id="test", user_id="user", action="unknown_action"
         ))
+
+
+@pytest.mark.unit
+def test_publication_adapter_matches_claim_and_checkpoint_protocol_signatures():
+    import inspect
+    from repositories.interfaces import IPublicationRepository
+    from repositories.publications_repo import PublicationRepository
+
+    for name in ("claim_pending", "check_ownership", "record_outcomes"):
+        protocol = inspect.signature(getattr(IPublicationRepository, name))
+        adapter = inspect.signature(getattr(PublicationRepository, name))
+        assert list(protocol.parameters) == list(adapter.parameters)
+        assert adapter.parameters["deadline"].kind is inspect.Parameter.KEYWORD_ONLY

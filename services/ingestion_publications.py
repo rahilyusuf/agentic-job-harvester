@@ -71,7 +71,10 @@ async def ingest_with_publications(
                 **error_fields(exc),
             )
             raise HTTPException(502, "Jobs stored; publication state unconfirmed") from exc
-        if not result.attempted_ids:
+        claimed_count = (
+            result.claimed_count if result.claimed_count is not None else len(result.attempted_ids)
+        )
+        if not claimed_count:
             emit("ingestion.recovery.completed", recovered=recovered, outcome="success")
             break
         published += len(result.confirmed)
@@ -87,7 +90,7 @@ async def ingest_with_publications(
             else "success",
             subscriber_processing="not_observed",
         )
-        if len(result.attempted_ids) < 100:
+        if claimed_count < 100:
             break
     try:
         counts = await repository.publications.publication_counts(list(expected))

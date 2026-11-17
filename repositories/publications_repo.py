@@ -4,7 +4,9 @@ import asyncio
 import json
 import logging
 import math
+import random
 import re
+import time
 import uuid
 
 from google.cloud import bigquery
@@ -13,10 +15,14 @@ from config.settings import Settings, get_settings
 from observability.ingestion_logging import emit
 from schemas.publication_models import (
     PROCESSING_VERSION,
+    CheckpointResult,
     ProcessingBusy,
     ProcessingClaim,
     PublicationClaim,
+    PublicationOwnership,
+    QueryFailed,
     QueryOutcomeUnconfirmed,
+    QueryTransactionAborted,
     publication_id,
 )
 
@@ -49,38 +55,115 @@ class PublicationRepository:
             *extra,
         ]
 
-    async def execute(self, sql: str, parameters: list, *, job_id: str | None = None) -> list[dict]:
-        """Submit once; resolve uncertainty through the SAME query job, never a new append."""
-        job_id = job_id or f"harvester_{uuid.uuid4().hex}"
+    async def execute(
+        self, sql: str, parameters: list, *, job_id: str | None = None,
+        deadline: float | None = None,
+    ) -> list[dict]:
+        """Retry only proven rollback; resolve ambiguity through the original job ID."""
+        deadline = min(
+            deadline if deadline is not None else float("inf"), time.monotonic() + 120,
+        )
 
-        def run():
+        def remaining(cap):
+            value = min(cap, deadline - time.monotonic())
+            if value <= 0:
+                raise TimeoutError("BigQuery operation deadline exceeded")
+            return value
+
+        def classify(job, query_id):
+            error = job.error_result
+            if job.state != "DONE" or not isinstance(error, dict):
+                return None
+            reason = error.get("reason")
+            message = error.get("message") or ""
+            # invalidQuery alone is NOT proof of rollback. This terminal signature is.
+            if reason in {"invalidQuery", "concurrentUpdate"} and (
+                "Transaction is aborted due to concurrent update" in message
+            ):
+                return QueryTransactionAborted(query_id)
+            if reason == "invalidQuery" and (
+                message.startswith("Syntax error:")
+                or re.match(
+                    r"(?:Query error: )?(?:Ambiguous existing raw jobs|"
+                    r"Retained identity has no raw job|Duplicate publication identities|"
+                    r"Duplicate publication jobs) at \[", message,
+                )
+            ):
+                # These owned assertions precede every write/COMMIT; syntax never executes.
+                category = (
+                    "raw_identity_conflict"
+                    if "Ambiguous existing raw jobs" in message
+                    or "Retained identity has no raw job" in message
+                    else "query_failed"
+                )
+                return QueryFailed(query_id, category)
+            # A script can fail AFTER COMMIT. Without rollback proof, hold it uncertain.
+            if "COMMIT TRANSACTION" not in sql.upper() and reason in {
+                "invalidQuery", "accessDenied", "notFound", "invalid",
+            }:
+                return QueryFailed(query_id)
+            return None
+
+        def run(query_id):
             try:
                 job = self.client.query(
                     sql,
                     job_config=bigquery.QueryJobConfig(query_parameters=parameters),
-                    job_id=job_id,
-                    location=self.settings.bq_location,
-                    job_retry=None,
+                    job_id=query_id, location=self.settings.bq_location,
+                    job_retry=None, retry=None, timeout=remaining(10),
                 )
-                return [dict(row.items()) for row in job.result(timeout=60)]
+                return [dict(row.items()) for row in job.result(
+                    timeout=remaining(60), retry=None, job_retry=None,
+                )]
             except Exception:
+                resolved_job = None
                 try:
-                    job = self.client.get_job(job_id, location=self.settings.bq_location)
-                    return [dict(row.items()) for row in job.result(timeout=60)]
-                except Exception as exc:
-                    # Do not include SQL, credentials, job contents or upstream error text.
-                    emit(
-                        "ingestion.bigquery.unconfirmed",
-                        logging.ERROR,
-                        query_job_id=job_id,
-                        error_category="query_outcome_unconfirmed",
+                    job = self.client.get_job(
+                        query_id, location=self.settings.bq_location,
+                        retry=None, timeout=remaining(10),
                     )
-                    raise QueryOutcomeUnconfirmed(job_id) from exc
+                    resolved_job = job
+                    failure = classify(job, query_id)
+                    if failure is not None:
+                        raise failure
+                    return [dict(row.items()) for row in job.result(
+                        timeout=remaining(60), retry=None, job_retry=None,
+                    )]
+                except QueryFailed:
+                    raise
+                except Exception as exc:
+                    if resolved_job is not None:
+                        failure = classify(resolved_job, query_id)
+                        if failure is not None:
+                            raise failure from exc
+                    emit(
+                        "ingestion.bigquery.unconfirmed", logging.ERROR,
+                        query_job_id=query_id, error_category="query_outcome_unconfirmed",
+                    )
+                    raise QueryOutcomeUnconfirmed(query_id) from exc
 
-        return await asyncio.to_thread(run)
+        for attempt in range(3):
+            query_id = job_id if attempt == 0 and job_id else f"harvester_{uuid.uuid4().hex}"
+            try:
+                return await asyncio.to_thread(run, query_id)
+            except QueryTransactionAborted:
+                if attempt == 2:
+                    raise
+                delay = random.uniform(0, 2 ** attempt)
+                if time.monotonic() + delay >= deadline:
+                    raise
+                await asyncio.sleep(delay)
+            except QueryFailed as exc:
+                emit(
+                    "ingestion.bigquery.failed", logging.ERROR,
+                    query_job_id=query_id, error_category=exc.category,
+                )
+                raise
+        raise AssertionError("Unreachable")
 
     async def claim_pending(
-        self, job_ids: list[str] | None = None, limit: int = 100, min_age_seconds: int = 0
+        self, job_ids: list[str] | None = None, limit: int = 100, min_age_seconds: int = 0,
+        *, deadline: float | None = None,
     ) -> list[PublicationClaim]:
         if not 1 <= limit <= 100 or not 0 <= min_age_seconds <= 31536000:
             raise ValueError("Invalid publication batch bounds")
@@ -114,7 +197,8 @@ class PublicationRepository:
             attempt_count=attempt_count+1, updated_at=CURRENT_TIMESTAMP()
         WHERE publication_id IN (SELECT publication_id FROM selected);
         COMMIT TRANSACTION;
-        SELECT publication_id, job_id, @token AS lease_token FROM selected;
+        SELECT s.publication_id,s.job_id,@token AS lease_token,p.lease_expires_at
+        FROM selected s JOIN `{self.table}` p USING(publication_id);
         """
         rows = await self.execute(
             sql,
@@ -128,23 +212,57 @@ class PublicationRepository:
                     "lease", "INT64", self.settings.publication_lease_seconds
                 ),
             ),
+            deadline=deadline,
         )
         return [PublicationClaim.model_validate(row) for row in rows]
 
-    async def record_outcomes(
-        self, claims: list[PublicationClaim], confirmed: dict[str, str], unconfirmed_ids: list[str]
-    ) -> None:
+    async def check_ownership(
+        self, claims: list[PublicationClaim], *, deadline: float | None = None,
+    ) -> list[PublicationOwnership]:
         if not claims:
-            return
-        if set(confirmed) & set(unconfirmed_ids) or set(confirmed) | set(unconfirmed_ids) != {
-            c.job_id for c in claims
-        }:
+            return []
+        rows = await self.execute(
+            f"""
+            WITH requested AS (
+                SELECT JSON_VALUE(item,'$.publication_id') AS publication_id,
+                    JSON_VALUE(item,'$.lease_token') AS token
+                FROM UNNEST(JSON_QUERY_ARRAY(@claims)) item
+            )
+            SELECT p.publication_id,p.job_id,p.lease_token,p.lease_expires_at,
+                CURRENT_TIMESTAMP() AS server_now
+            FROM `{self.table}` p JOIN requested r USING(publication_id)
+            WHERE p.topic=@topic AND p.processing_version=@version
+                AND p.state='IN_FLIGHT' AND p.lease_token=r.token
+                AND p.lease_expires_at>CURRENT_TIMESTAMP()
+                AND (SELECT COUNT(*) FROM `{self.raw_table}` j WHERE j.job_id=p.job_id)=1
+            """,
+            self.parameters(bigquery.ScalarQueryParameter(
+                "claims", "STRING", json.dumps([c.model_dump(mode="json") for c in claims]),
+            )),
+            deadline=deadline,
+        )
+        owners = [PublicationOwnership.model_validate(row) for row in rows]
+        expected = {(c.publication_id, c.job_id, c.lease_token) for c in claims}
+        actual = [(c.publication_id, c.job_id, c.lease_token) for c in owners]
+        if len(actual) != len(set(actual)) or not set(actual).issubset(expected):
+            raise ValueError("Invalid publication ownership confirmation")
+        return owners
+
+    async def record_outcomes(
+        self, claims: list[PublicationClaim], confirmed: dict[str, str], unconfirmed_ids: list[str],
+        *, deadline: float | None = None,
+    ) -> CheckpointResult:
+        if not claims:
+            return CheckpointResult()
+        ids = [c.job_id for c in claims]
+        if (len(ids) != len(set(ids)) or len({c.publication_id for c in claims}) != len(ids)
+            or set(confirmed) & set(unconfirmed_ids)
+            or len(unconfirmed_ids) != len(set(unconfirmed_ids))
+            or set(confirmed) | set(unconfirmed_ids) != set(ids)
+            or any(not isinstance(v, str) or not v for v in confirmed.values())):
             raise ValueError("Invalid publication outcome set")
         outcomes = [
-            {
-                **claim.model_dump(),
-                "message_id": confirmed.get(claim.job_id),
-            }
+            {**claim.model_dump(mode="json"), "message_id": confirmed.get(claim.job_id)}
             for claim in claims
         ]
         sql = f"""
@@ -152,9 +270,19 @@ class PublicationRepository:
         DELETE FROM `{self.table}` WHERE FALSE;
         CREATE TEMP TABLE outcomes AS SELECT
             JSON_VALUE(item,'$.publication_id') AS publication_id,
+            JSON_VALUE(item,'$.job_id') AS job_id,
             JSON_VALUE(item,'$.lease_token') AS token,
             JSON_VALUE(item,'$.message_id') AS message_id
         FROM UNNEST(JSON_QUERY_ARRAY(@outcomes)) item;
+        ASSERT NOT EXISTS (
+            SELECT p.publication_id FROM `{self.table}` p JOIN outcomes o USING(publication_id)
+            GROUP BY p.publication_id HAVING COUNT(*)>1
+        ) AS 'Duplicate publication identities';
+        CREATE TEMP TABLE eligible AS
+        SELECT o.* FROM outcomes o JOIN `{self.table}` p USING(publication_id)
+        WHERE p.topic=@topic AND p.processing_version=@version AND p.job_id=o.job_id
+            AND p.state='IN_FLIGHT' AND p.lease_token=o.token
+            AND p.lease_expires_at>CURRENT_TIMESTAMP();
         UPDATE `{self.table}` p SET
             state=IF(o.message_id IS NULL,'PENDING','PUBLISHED'),
             message_id=o.message_id,
@@ -164,17 +292,29 @@ class PublicationRepository:
                     TIMESTAMP_ADD(CURRENT_TIMESTAMP(),INTERVAL 60 SECOND)),NULL),
             last_error_code=IF(o.message_id IS NULL,'publication_unconfirmed',NULL),
             lease_token=NULL, lease_expires_at=NULL, updated_at=CURRENT_TIMESTAMP()
-        FROM outcomes o WHERE p.publication_id=o.publication_id AND p.topic=@topic
-            AND p.state='IN_FLIGHT' AND p.lease_token=o.token
-            AND p.lease_expires_at>CURRENT_TIMESTAMP();
-        ASSERT @@row_count=(SELECT COUNT(*) FROM outcomes) AS 'Publication lease lost';
+        FROM eligible o WHERE p.publication_id=o.publication_id;
+        CREATE TEMP TABLE results AS
+        SELECT o.job_id, COALESCE((e.publication_id IS NOT NULL OR
+            (o.message_id IS NOT NULL AND p.state='PUBLISHED' AND p.message_id=o.message_id)),FALSE)
+            AS checkpointed
+        FROM outcomes o LEFT JOIN eligible e USING(publication_id)
+        LEFT JOIN `{self.table}` p ON p.publication_id=o.publication_id
+            AND p.topic=@topic AND p.processing_version=@version AND p.job_id=o.job_id;
         COMMIT TRANSACTION;
+        SELECT * FROM results;
         """
-        await self.execute(
-            sql,
-            self.parameters(
-                bigquery.ScalarQueryParameter("outcomes", "STRING", json.dumps(outcomes)),
-            ),
+        rows = await self.execute(
+            sql, self.parameters(bigquery.ScalarQueryParameter(
+                "outcomes", "STRING", json.dumps(outcomes),
+            )), deadline=deadline,
+        )
+        if (len(rows) != len(ids) or {r["job_id"] for r in rows} != set(ids)
+            or any(type(r["checkpointed"]) is not bool for r in rows)):
+            raise ValueError("Invalid checkpoint confirmation")
+        saved = {r["job_id"] for r in rows if r["checkpointed"]}
+        return CheckpointResult(
+            checkpointed_ids=[i for i in ids if i in saved],
+            lease_lost_ids=[i for i in ids if i not in saved],
         )
 
     async def publication_counts(self, job_ids: list[str]) -> dict[str, int]:

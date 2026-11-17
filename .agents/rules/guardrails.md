@@ -82,7 +82,10 @@ and traces from durable state. Pub/Sub consumers require verified caller configu
 
 Job records, embeddings, evaluations, and actions live in BigQuery. Firestore is only
 for configuration and research caches; caches must not leak user-specific history.
-Deduplicate raw ingestion by job ID over the 90-day baseline. Use domain-appropriate
+Deduplicate raw ingestion by lifetime logical job ID; ninety days is a freshness
+window, never an identity reset. Recrawls preserve original content/status. Strict
+concurrent-insert and post-retention identity protection requires all writers to use
+the opt-in durable ledger; legacy streaming remains best-effort. Use domain-appropriate
 keys for other records: job ID for embeddings, `(job_id, user_id)` for evaluations,
 user ID for profiles, event identity for actions. A universal job-ID dedupe requirement
 cannot apply to profiles or legitimately repeated action types.
