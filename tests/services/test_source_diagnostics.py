@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from google.api_core.exceptions import BadRequest, ServiceUnavailable
 
+from config.settings import Settings
 from observability import diagnostics
 from observability.diagnostics import diagnostic_operation, exception_fields
 from observability.ingestion_logging import (
@@ -19,7 +20,6 @@ from observability.ingestion_logging import (
 )
 from repositories.raw_jobs_repo import RawJobRepository
 from tests.services.test_embedding_worker import _make_dummy_job
-from config.settings import Settings
 
 
 def sdk_raise(error):

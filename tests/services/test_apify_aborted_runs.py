@@ -200,21 +200,22 @@ def test_aborted_setting_environment_parsing(monkeypatch, value, expected):
     monkeypatch.delenv("APIFY_INGEST_ABORTED_RUNS", raising=False)
     if value is not None:
         monkeypatch.setenv("APIFY_INGEST_ABORTED_RUNS", value)
-    values = dict(
-        _env_file=None,
-        gcp_project_id="test-project",
-        litellm_proxy_base_url="http://localhost:4000",
-        litellm_proxy_api_key="dummy",
-        telegram_bot_token="dummy",
-        e2b_api_key="dummy",
-        apify_api_token="dummy",
-    )
+    def make_settings() -> Settings:
+        return Settings(
+            _env_file=None,
+            gcp_project_id="test-project",
+            litellm_proxy_base_url="http://localhost:4000",
+            litellm_proxy_api_key="dummy",
+            telegram_bot_token="dummy",
+            e2b_api_key="dummy",
+            apify_api_token="dummy",
+        )
     with patch("config.settings._fetch_secret", side_effect=AssertionError("No secret calls")):
         if expected is None:
             with pytest.raises(ValidationError):
-                Settings(**values)
+                make_settings()
         else:
-            assert Settings(**values).apify_ingest_aborted_runs is expected
+            assert make_settings().apify_ingest_aborted_runs is expected
 
 
 @pytest.mark.asyncio

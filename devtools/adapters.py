@@ -11,6 +11,7 @@ from schemas.job_models import RawJob
 def _publication_settings():
     """Respect explicit dev process configuration without resolving production secrets."""
     from pydantic import TypeAdapter
+
     from config.settings import Settings
 
     return Settings.model_construct(

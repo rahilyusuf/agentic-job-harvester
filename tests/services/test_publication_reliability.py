@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from fastapi import HTTPException
+from starlette.responses import JSONResponse
 
 from config.settings import Settings
 from repositories.publications_repo import PublicationRepository
@@ -16,14 +18,14 @@ from repositories.raw_jobs_repo import RawJobRepository
 from schemas.publication_models import (
     BatchInsertResult,
     CheckpointResult,
-    PublicationOwnership,
-    QueryFailed,
-    QueryTransactionAborted,
     ProcessingBusy,
     ProcessingClaim,
     ProcessingLeaseLost,
     PublicationClaim,
+    PublicationOwnership,
+    QueryFailed,
     QueryOutcomeUnconfirmed,
+    QueryTransactionAborted,
     publication_id,
 )
 from scripts.plan_publication_migration import build_manifest
@@ -307,7 +309,7 @@ async def test_partial_or_unconfirmed_persistence_never_publishes(full_batch):
         return_value=BatchInsertResult(unconfirmed_ids=[j.job_id for j in full_batch.jobs])
     )
     dispatcher = AsyncMock()
-    with pytest.raises(Exception) as error:
+    with pytest.raises(HTTPException) as error:
         await ingest_with_publications(
             full_batch,
             dataset_id="d",
@@ -431,6 +433,7 @@ async def test_worker_busy_delivery_is_retryable_not_acknowledged(monkeypatch):
     monkeypatch.setattr(embedding_worker, "get_settings", settings)
     monkeypatch.setattr(embedding_worker, "_process_job", AsyncMock(side_effect=ProcessingBusy()))
     response = await embedding_worker.pubsub_push(_build_pubsub_request("job"))
+    assert isinstance(response, JSONResponse)
     assert response.status_code == 503
 
 
@@ -1110,6 +1113,7 @@ async def test_failed_publications_do_not_reselect_deferred_ids_on_remaining_pag
 @pytest.mark.asyncio
 async def test_raw_sql_expressions_match_every_checked_in_field():
     import re
+
     from schemas.job_models import RawJob
     client = MagicMock()
     client.query.return_value.result.return_value = [{"job_id": "job", "inserted": True}]
@@ -1128,16 +1132,17 @@ async def test_raw_sql_expressions_match_every_checked_in_field():
 
 @pytest.mark.asyncio
 async def test_preflight_adapter_checks_token_expiry_and_unique_raw_record():
-    repo = PublicationRepository(MagicMock(), settings=settings())
+    client = MagicMock()
+    repo = PublicationRepository(client, settings=settings())
     claim = PublicationClaim(
         publication_id="pub", job_id="job", lease_token="token",
         lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=1800),
     )
-    repo.client.query.return_value.result.return_value = [{
+    client.query.return_value.result.return_value = [{
         **claim.model_dump(), "server_now": datetime.now(timezone.utc),
     }]
     assert (await repo.check_ownership([claim]))[0].job_id == "job"
-    sql = repo.client.query.call_args.args[0]
+    sql = client.query.call_args.args[0]
     assert "p.lease_token=r.token" in sql and "p.lease_expires_at>CURRENT_TIMESTAMP()" in sql
     assert "j.job_id=p.job_id)=1" in sql
     assert "CURRENT_TIMESTAMP() AS server_now" in sql

@@ -26,6 +26,7 @@ provided content with its own constraint (AGENTS.md #3: never logged).
 from __future__ import annotations
 
 import re
+from typing import Any, TypedDict
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -195,6 +196,15 @@ def sanitize_scraped_text(
     return wrapped
 
 
+class SanitizedJobFields(TypedDict):
+    title: str
+    company: str
+    location: str | None
+    description: str
+    salary_raw: str | None
+    employment_type_raw: str | None
+
+
 def sanitize_job_fields(
     *,
     title: str,
@@ -204,7 +214,7 @@ def sanitize_job_fields(
     salary_raw: str | None = None,
     employment_type_raw: str | None = None,
     wrap: bool = False,
-) -> dict[str, str | None]:
+) -> SanitizedJobFields:
     """Sanitize all free-text fields of a raw job posting.
 
     Convenience wrapper for ingestion (``apify_receiver`` / normalizers) and

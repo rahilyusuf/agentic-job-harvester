@@ -524,21 +524,22 @@ def test_ingestion_log_level_settings(monkeypatch, value, expected):
     monkeypatch.delenv("INGESTION_LOG_LEVEL", raising=False)
     if value is not None:
         monkeypatch.setenv("INGESTION_LOG_LEVEL", value)
-    values = dict(
-        _env_file=None,
-        gcp_project_id="test-project",
-        litellm_proxy_base_url="http://localhost:4000",
-        litellm_proxy_api_key="dummy",
-        telegram_bot_token="dummy",
-        e2b_api_key="dummy",
-        apify_api_token="dummy",
-    )
+    def make_settings() -> Settings:
+        return Settings(
+            _env_file=None,
+            gcp_project_id="test-project",
+            litellm_proxy_base_url="http://localhost:4000",
+            litellm_proxy_api_key="dummy",
+            telegram_bot_token="dummy",
+            e2b_api_key="dummy",
+            apify_api_token="dummy",
+        )
     with patch("config.settings._fetch_secret", side_effect=AssertionError("No secrets")):
         if expected is None:
             with pytest.raises(ValidationError):
-                Settings(**values)
+                make_settings()
         else:
-            assert Settings(**values).ingestion_log_level == expected
+            assert make_settings().ingestion_log_level == expected
 
 
 @pytest.mark.asyncio

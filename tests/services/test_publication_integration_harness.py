@@ -293,8 +293,8 @@ def test_guarded_bigquery_rejects_production_and_injects_only_test_faults(manife
 
 @pytest.mark.asyncio
 async def test_lost_real_job_response_resolves_original_id_without_resubmission(manifest):
-    from repositories.publications_repo import PublicationRepository
     from config.settings import Settings
+    from repositories.publications_repo import PublicationRepository
 
     client, journal = MagicMock(), MagicMock()
     guarded = harness.GuardedBigQuery(client, manifest, journal, harness.Budget())

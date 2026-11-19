@@ -2,8 +2,8 @@
 
 import asyncio
 import json
-from time import monotonic
 from collections.abc import Awaitable, Callable
+from time import monotonic
 
 from google.cloud import pubsub_v1
 
@@ -88,7 +88,12 @@ async def dispatch_pending(
                                 )
                             path = publisher.topic_path(project_id, topic)
 
-                            def send(job_id=claim.job_id, until=send_deadline):
+                            def send(
+                                job_id: str = claim.job_id,
+                                until: float = send_deadline,
+                                publisher: pubsub_v1.PublisherClient = publisher,
+                                path: str = path,
+                            ) -> str:
                                 # Recheck INSIDE the thread; executor queuing can consume a lease.
                                 if monotonic() + PUBLISH_TIMEOUT_SECONDS >= until:
                                     raise _SendNotStarted("Publication lease budget exhausted")

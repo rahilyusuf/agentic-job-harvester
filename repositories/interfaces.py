@@ -15,11 +15,13 @@ from typing import Protocol, runtime_checkable
 
 from schemas.job_models import EvaluatedJob, RawJob
 from schemas.profile_models import UserProfile
-from schemas.scoring_models import ScorerOutput, SkepticOutput
 from schemas.publication_models import (
-    BatchInsertResult, CheckpointResult, PublicationClaim, PublicationOwnership, ProcessingClaim,
+    BatchInsertResult,
+    CheckpointResult,
+    ProcessingClaim,
+    PublicationClaim,
+    PublicationOwnership,
 )
-
 
 # ── Raw Jobs ───────────────────────────────────────────────────────────────────
 

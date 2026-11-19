@@ -93,7 +93,10 @@ async def ingest_with_publications(
         if claimed_count < 100:
             break
     try:
-        counts = await repository.publications.publication_counts(list(expected))
+        publications = repository.publications
+        if publications is None:
+            raise ValueError("Publication ledger is not configured")
+        counts = await publications.publication_counts(list(expected))
     except Exception as exc:
         raise HTTPException(502, "Jobs stored; publication state unconfirmed") from exc
     if any(counts.get(state, 0) for state in ("PENDING", "IN_FLIGHT", "UNKNOWN")):

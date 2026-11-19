@@ -9,8 +9,8 @@ ARCHITECTURE.md: "calls text-embedding-004 on f'{title} {company} {location} {de
 
 from __future__ import annotations
 
-import base64
 import asyncio
+import base64
 import json
 import logging
 from contextlib import asynccontextmanager
@@ -20,12 +20,12 @@ from fastapi.responses import JSONResponse
 
 from config.settings import get_settings
 from gateway.client import generate_embedding
+from observability.ingestion_logging import emit
 from observability.setup import setup_observability
 from repositories.embeddings_repo import EmbeddingRepository
 from repositories.raw_jobs_repo import RawJobRepository
 from schemas.job_models import JobStatus, RawJob
 from schemas.publication_models import QueryOutcomeUnconfirmed
-from observability.ingestion_logging import emit
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +56,8 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/", status_code=status.HTTP_204_NO_CONTENT)
-async def pubsub_push(request: Request) -> None:
+@app.post("/", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
+async def pubsub_push(request: Request) -> JSONResponse | None:
     """Handle Pub/Sub push message containing a job_id to embed."""
     envelope = await request.json()
     message = envelope.get("message", {})

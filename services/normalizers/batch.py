@@ -1,10 +1,11 @@
 """Shared ordered normalization and first-valid-occurrence deduplication."""
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 
-from schemas.job_models import RawJob
 from observability.ingestion_logging import context, emit
+from schemas.job_models import RawJob
 from services.normalizers import apify_career_scraper
 
 logger = logging.getLogger(__name__)
@@ -20,7 +21,7 @@ class NormalizedBatch:
     apply_url_fallback: int
 
 
-def normalize_batch(items: list[object]) -> NormalizedBatch:
+def normalize_batch(items: Sequence[object]) -> NormalizedBatch:
     jobs: dict[str, RawJob] = {}
     normalized = rejected = duplicates = fallbacks = 0
     state = context()

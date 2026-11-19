@@ -47,7 +47,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from google.cloud import pubsub_v1
 
 from config.settings import get_settings
-from observability.setup import flush_observability, setup_observability
 from observability.ingestion_logging import (
     COUNTERS,
     configure_ingestion_logging,
@@ -57,10 +56,9 @@ from observability.ingestion_logging import (
     request_context,
     stage,
 )
+from observability.setup import flush_observability, setup_observability
 from repositories.raw_jobs_repo import RawJobRepository
-from services.normalizers import apify_career_scraper
 from services.normalizers.batch import normalize_batch
-from schemas.job_models import RawJob
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +176,7 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
         if state.ignored:
             emit(
                 "ingestion.ignored",
+                logging.INFO,
                 outcome="ignored",
                 duration_ms=round((perf_counter() - state.started) * 1000),
                 **state.counters,
@@ -681,6 +680,9 @@ async def reconcile_unpublished_jobs(
     if settings.publication_ledger_enabled:
         from services.publication_dispatcher import dispatch_pending
 
+        publications = active_repo.publications
+        if publications is None:
+            raise ValueError("Publication ledger is not configured")
         published = failures = reconciled = 0
         ids = []
         # Offset is a claim-budget counter, not a SQL OFFSET. Claims leave the
@@ -688,7 +690,7 @@ async def reconcile_unpublished_jobs(
         for offset in range(0, limit, 100):
             page_limit = min(100, limit - offset)
             result = await dispatch_pending(
-                active_repo.publications,
+                publications,
                 project_id=settings.gcp_project_id,
                 topic=settings.pubsub_embedding_topic,
                 limit=page_limit,

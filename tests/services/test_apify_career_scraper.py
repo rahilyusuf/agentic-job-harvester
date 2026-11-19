@@ -9,7 +9,6 @@ from typing import Any
 
 import pytest
 
-from services.normalizers import apify_career_scraper
 from services.normalizers.apify_career_scraper import normalize, resolve_job_url
 
 

@@ -26,7 +26,6 @@ from typing import Any, ClassVar, TypeVar
 from pydantic import BaseModel
 
 from gateway.client import GatewayClient, get_instructor_client
-from observability.setup import observe
 
 logger = logging.getLogger(__name__)
 

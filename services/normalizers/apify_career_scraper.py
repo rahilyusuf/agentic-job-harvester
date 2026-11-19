@@ -31,8 +31,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from orchestration.input_sanitizer import sanitize_job_fields
 from observability.ingestion_logging import emit
+from orchestration.input_sanitizer import sanitize_job_fields
 from schemas.job_models import RawJob
 from utils.ids import compute_job_id
 from utils.time import utcnow

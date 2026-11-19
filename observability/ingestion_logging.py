@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Any
 
 from observability.diagnostics import caller_source, exception_fields, location_text, safe_location
 
@@ -185,7 +186,7 @@ def _event_fields(event: str, level: int, fields: dict[str, object]) -> dict[str
     return record
 
 
-def error_fields(error: BaseException) -> dict[str, object]:
+def error_fields(error: BaseException) -> dict[str, Any]:
     return exception_fields(error)
 
 
@@ -313,6 +314,7 @@ def _compact_summary(fields: dict[str, object]) -> tuple[str, str]:
                 f"Retries exhausted after {count('attempt')} attempts: {fields.get('error_type')}",
             )
         delay = fields.get("retry_delay_ms", 0)
+        assert isinstance(delay, (int, float))
         return label, (
             f"Retry {count('attempt')}/{count('max_attempts')}: {fields.get('error_type')}"
             f"; next attempt in {delay / 1000:.2f}s"
@@ -389,7 +391,9 @@ class IngestionFormatter(logging.Formatter):
                 "ingestion.cancelled",
             }
             if fields.get("event") in timed_events:
-                summary += f" ({fields['duration_ms'] / 1000:.2f}s)"
+                duration = fields["duration_ms"]
+                assert isinstance(duration, (int, float))
+                summary += f" ({duration / 1000:.2f}s)"
             if record.levelno >= logging.WARNING and fields.get("request_id"):
                 summary += f" [{str(fields['request_id'])[:8]}]"
             line = f"{timestamp} {severity:<5} [{label}] {summary}"
@@ -412,10 +416,11 @@ class IngestionFormatter(logging.Formatter):
                         " | ".join(diagnostic), width=100, initial_indent="    ",
                         subsequent_indent="    ", break_long_words=False, break_on_hyphens=False,
                     )
+            published = fields.get("published")
             if (
                 fields.get("event") == "ingestion.completed"
-                and type(fields.get("published")) is int
-                and fields["published"] > 0
+                and type(published) is int
+                and published > 0
                 and fields.get("subscriber_processing") == "not_observed"
             ):
                 line += f"\n{timestamp} INFO  [Worker] Processing not verified"

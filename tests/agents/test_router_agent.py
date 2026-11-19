@@ -5,10 +5,11 @@ Uses unittest.mock to patch gateway.client.GatewayClient so no real LLM calls ar
 
 from __future__ import annotations
 
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
-from schemas.job_models import RawJob, JobStatus
+import pytest
+
+from schemas.job_models import RawJob
 from schemas.routing_models import RouterDecision, RoutingDecision
 from utils.time import utcnow
 

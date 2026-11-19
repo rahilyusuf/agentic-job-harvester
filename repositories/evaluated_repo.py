@@ -7,7 +7,6 @@ Read by telegram_webhook for notification dispatch and by reflection_runner for 
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 
 from google.cloud import bigquery
 

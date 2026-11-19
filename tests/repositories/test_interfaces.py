@@ -6,8 +6,13 @@ No live BigQuery calls — uses duck-typing Protocol checks.
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import pytest
 
+from repositories.actions_repo import ActionsRepository
+from repositories.embeddings_repo import EmbeddingRepository
+from repositories.evaluated_repo import EvaluatedRepository
 from repositories.interfaces import (
     IActionsRepository,
     IEmbeddingRepository,
@@ -15,12 +20,8 @@ from repositories.interfaces import (
     IProfileRepository,
     IRawJobRepository,
 )
-from repositories.raw_jobs_repo import RawJobRepository
-from repositories.embeddings_repo import EmbeddingRepository
-from repositories.evaluated_repo import EvaluatedRepository
-from repositories.actions_repo import ActionsRepository
 from repositories.profiles_repo import ProfileRepository
-from unittest.mock import MagicMock
+from repositories.raw_jobs_repo import RawJobRepository
 
 
 def make_mock_bq_client() -> MagicMock:
@@ -89,6 +90,7 @@ def test_invalid_actions_repo_action_raises() -> None:
 @pytest.mark.unit
 def test_publication_adapter_matches_claim_and_checkpoint_protocol_signatures():
     import inspect
+
     from repositories.interfaces import IPublicationRepository
     from repositories.publications_repo import PublicationRepository
 

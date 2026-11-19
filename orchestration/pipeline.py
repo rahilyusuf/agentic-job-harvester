@@ -17,16 +17,13 @@ from dataclasses import dataclass
 
 from agents.company_agent import CompanyVerificationAgent
 from agents.redflag_agent import RedFlagDetectorAgent
-from agents.reflection_agent import ReflectionAgent
 from agents.research_agent import CompanyResearchAgent
 from agents.router_agent import JobIntakeRouter
 from agents.scorer_agent import ScorerAgent
-from agents.skillgap_agent import SkillGapAgent
 from agents.skeptic_agent import SkepticAgent
+from agents.skillgap_agent import SkillGapAgent
 from orchestration.output_validator import OutputValidator
 from repositories.interfaces import (
-    IActionsRepository,
-    IEmbeddingRepository,
     IEvaluatedRepository,
     IProfileRepository,
     IRawJobRepository,

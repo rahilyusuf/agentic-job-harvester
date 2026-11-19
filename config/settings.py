@@ -11,9 +11,8 @@ Usage:
 
 from __future__ import annotations
 
-import os
 from functools import lru_cache
-from typing import Literal, Optional
+from typing import Literal
 
 from google.cloud import secretmanager
 from pydantic import Field, field_validator, model_validator

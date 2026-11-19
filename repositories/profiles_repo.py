@@ -13,7 +13,7 @@ import logging
 from google.cloud import bigquery
 
 from config.settings import get_settings
-from schemas.profile_models import ResumeMetadata, UserProfile
+from schemas.profile_models import UserProfile
 from utils.retry import async_retry
 from utils.time import format_bq_timestamp, utcnow
 

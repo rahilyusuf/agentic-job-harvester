@@ -26,9 +26,7 @@ import logging
 from functools import lru_cache
 
 import litellm
-import langfuse
-from langfuse import get_client, observe  # re-exported for convenience
-from langfuse import Langfuse
+from langfuse import Langfuse, get_client, observe  # re-exported for convenience
 
 from config.settings import get_settings
 

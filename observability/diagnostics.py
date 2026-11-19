@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType
+from typing import Any
 
 _ROOT = Path(__file__).resolve().parents[1]
 _INFRASTRUCTURE = {
@@ -107,13 +108,16 @@ def diagnostic_operation(dependency: str, operation: str):
     except BaseException as error:
         try:
             if not isinstance(getattr(error, "_diagnostic_operation", None), _Operation):
-                error._diagnostic_operation = _Operation(dependency, operation)
+                # Third-party exceptions expose diagnostic metadata dynamically.
+                setattr(  # noqa: B010
+                    error, "_diagnostic_operation", _Operation(dependency, operation)
+                )
         except Exception:
             pass  # Diagnostics must never replace the original failure/cancellation.
         raise
 
 
-def _chain(error: BaseException) -> list[BaseException]:
+def _chain(error: BaseException | None) -> list[BaseException]:
     errors, seen = [], set()
     while error is not None and id(error) not in seen:
         seen.add(id(error))
@@ -129,7 +133,7 @@ def _attribute(error: BaseException, name: str):
         return None
 
 
-def exception_fields(error: BaseException) -> dict:
+def exception_fields(error: BaseException) -> dict[str, Any]:
     """Never formats an exception, traceback, response body, SQL or frame locals."""
     errors = _chain(error)
     fields = {"error_type": type(errors[-1]).__name__, "error_location": None}

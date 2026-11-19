@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field
 
 
 class ResumeMetadata(BaseModel):
@@ -28,14 +28,16 @@ class ResumeMetadata(BaseModel):
     )
     top_skills: list[str] = Field(..., min_length=1, max_length=50)
     education_level: str | None = Field(
-        None,
-        description="Highest degree: PhD | Masters | Bachelors | Associate | Bootcamp | Self-taught",
+        default=None,
+        description=(
+            "Highest degree: PhD | Masters | Bachelors | Associate | Bootcamp | Self-taught"
+        ),
     )
     industries_worked: list[str] = Field(default_factory=list, max_length=10)
     preferred_locations: list[str] = Field(default_factory=list, max_length=10)
     open_to_remote: bool = True
-    salary_expectation_min_usd: int | None = Field(None, ge=0)
-    salary_expectation_max_usd: int | None = Field(None, ge=0)
+    salary_expectation_min_usd: int | None = Field(default=None, ge=0)
+    salary_expectation_max_usd: int | None = Field(default=None, ge=0)
     willing_to_relocate: bool = False
     resume_text_hash: str = Field(
         ..., description="SHA-256 of raw resume text for change detection"
@@ -67,11 +69,11 @@ class UserProfile(BaseModel):
         description="768-dim active centroid: (1-α)*e_resume + α*e_accepted_centroid",
     )
     active_vector_alpha: float = Field(
-        0.0, ge=0.0, le=1.0,
+        default=0.0, ge=0.0, le=1.0,
         description="Current α used in centroid blend; 0.0 = pure resume, 1.0 = pure accepted jobs"
     )
     notification_threshold_score: int = Field(
-        85, ge=0, le=100,
+        default=85, ge=0, le=100,
         description="Minimum agreed_score to trigger Telegram notification"
     )
     is_active: bool = True

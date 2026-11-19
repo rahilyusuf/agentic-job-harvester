@@ -11,14 +11,12 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
 
 from google.cloud import bigquery
-from google.cloud.exceptions import NotFound
 
 from config.settings import Settings, get_settings
-from observability.ingestion_logging import emit
 from observability.diagnostics import diagnostic_operation
+from observability.ingestion_logging import emit
 from schemas.job_models import JobStatus, RawJob
 from schemas.publication_models import BatchInsertResult, QueryOutcomeUnconfirmed
 from utils.retry import async_retry
@@ -208,7 +206,10 @@ class RawJobRepository:
         rows = [j.model_dump(mode="json") for j in novel_jobs]
         insert_options = {} if retry_insert else {"retry": None}
         with diagnostic_operation("bigquery", "streaming_insert"):
-            errors = self._client.insert_rows_json(self._table, rows, **insert_options)
+            # SDK _call_api accepts None to disable retries; its public annotation omits None.
+            errors = self._client.insert_rows_json(
+                self._table, rows, **insert_options  # type: ignore[arg-type]
+            )
             if errors:
                 raise RuntimeError(f"BQ batch insert errors: {errors}")
 

@@ -695,6 +695,7 @@ class Scenarios:
 
     async def run(self):
         from fastapi import HTTPException
+
         from schemas.publication_models import QueryOutcomeUnconfirmed
         from services import publication_dispatcher
 
