@@ -120,3 +120,165 @@ cannot prove BigQuery's live transaction contention, IAM, location, service quot
 message routing or streaming-buffer state. A separately approved isolated integration
 test is required before turning this feature on. Preserve the raw fixture and all
 independently owned tests. No automatic schema changes, commits, pushes or deployments.
+
+## Isolated integration CLI (implemented; not live-verified)
+
+`scripts/verify_publication_ledger.py` never enables production settings. Its `plan`
+phase is offline, including credential discovery. Every other phase requires a reviewed
+manifest, `--execute`, an exact phase/run confirmation, and a new evidence filename.
+The tool refuses existing evidence files, resource overrides and changed source hashes.
+It never calls Apify, an embedding provider, Secret Manager, pull, ACK, seek or purge.
+Do not use the current `/dev/ingestion/execute`: its allowlist points to the existing
+`job_intelligence` dataset and `job-embedding-queue` topic, not these isolated resources.
+
+### Prepare and review (no cloud operations)
+
+Run from the repository root. Save the JSON output in a new, private local directory
+outside the Docker context (for example `.local/ledger-it/`). Do not overwrite another
+run's manifest or evidence. The following command only prints a plan:
+
+```powershell
+.\venv\Scripts\python.exe -m scripts.verify_publication_ledger plan
+```
+
+The manifest fixes project `agentic-job-harvester-v2`, location `US`, a fourteen-digit
+UTC run ID, dataset `ledger_it_<run>`, topic `ledger-it-<run>`, pull subscription
+`ledger-it-<run>-sub`, and service account `ledger-it-<run>@agentic-job-harvester-v2.iam.gserviceaccount.com`.
+Names cannot be overridden to select existing production resources. The hash covers
+the harness, production ingestion/normalizer/repository contracts, sanitizer, settings,
+DDL and dependency requirements. New source requires a newly reviewed manifest.
+
+### Separately authorize provisioning and IAM
+
+Review the manifest before issuing any live command. IAM setup is deliberately manual:
+the harness does not grant permissions, enable APIs or create service accounts.
+
+1. An authorized operator creates the exact new test service account; stop if it already
+   exists. Verify BigQuery and Pub/Sub APIs/billing without enabling anything implicitly.
+2. The operator uses `provision` below with existing operator credentials. It checks all
+   names are absent, creates the labeled dataset and two tables using the checked-in
+   field contracts, then creates the dedicated topic and pull-only subscription. Table
+   expiration is seven days; raw partitions retain the 365-day shape. The subscription
+   has a 60-second ACK deadline, 24-hour retention and seven-day inactivity expiration.
+3. Grant only the following reviewed scopes. The operator must check inherited roles,
+   deny policies and conditions; labels alone are not an IAM isolation boundary.
+
+| Principal | Role / scope |
+|---|---|
+| New test service account | `roles/bigquery.jobUser` on the project |
+| New test service account | `roles/bigquery.dataEditor` on the new dataset only |
+| New test service account | `roles/pubsub.publisher` on the new topic only |
+| New test service account | `roles/pubsub.viewer` on the new topic and subscription for metadata |
+| Approved local operator | `roles/iam.serviceAccountTokenCreator` on the new test account only |
+
+Do not grant Subscriber, Secret Accessor, Vertex access, or production dataset/topic
+access. Add the review ticket/reference to `iam_review_reference` in the manifest; `check`
+and `run` refuse an empty reference. This is an operator attestation, not automatic
+proof of effective IAM. The runtime impersonates the named account; it never falls back
+to operator credentials. Provisioning/cleanup use operator credentials explicitly.
+
+Below, replace `<RUN>` and paths with values from the reviewed manifest. These are
+live commands for a future authorized session, not commands executed during implementation:
+
+```powershell
+.\venv\Scripts\python.exe -m scripts.verify_publication_ledger provision --manifest .local/ledger-it/manifest.json --execute --confirm "PROVISION <RUN>" --evidence .local/ledger-it/provision.jsonl
+.\venv\Scripts\python.exe -m scripts.verify_publication_ledger check --manifest .local/ledger-it/manifest.json --execute --confirm "CHECK <RUN>" --evidence .local/ledger-it/check.jsonl
+```
+
+Preflight inspects actual isolated metadata: dataset ID/location/expiration, all 13 raw
+and 18 ledger fields/types/modes, table ownership/type/partitioning/clustering, streaming
+buffers, and the exact exclusive pull subscription. It performs no publication or data
+query. Any drift stops the run. Production schema verification is a separate metadata-only
+operator step: compare `job_intelligence` location, raw-table contracts/retention and
+streaming-buffer conditions with the checked-in DDL. Creating an existing table with
+`IF NOT EXISTS` does not verify its schema. Production schemas/IAM remain Unverified
+until that evidence has been reviewed; this test identity must not access them.
+
+### Execute in the production runtime
+
+`run` requires Python 3.11, matching the receiver Dockerfile; a host venv on Python 3.14
+is sufficient for planning/checking but cannot satisfy the live runtime gate. Use a
+separately prepared Python 3.11 environment or the reviewed receiver image with only
+the harness mounted read-only at `/app/scripts/verify_publication_ledger.py`. Mount the
+manifest read-only, evidence separately writable, and source credentials read-only
+outside the image. Do not copy credentials into a build. No dependency installation or
+image build is part of running the harness. Preserve the exact source hash/image digest
+alongside the evidence.
+
+The `.dockerignore` excludes local environments, `.env` files, credential patterns,
+fixtures, tests and the harness. Review the full build context for other sensitive files.
+Do not invoke `infra/cloudbuild.yaml` just to build an image: it includes deployment steps.
+If a deployment relied on a bundled `.env`, stop rollout until its required settings and
+secret references are supplied through reviewed service configuration. Do not restore
+local credentials or dotenv files to the image to make startup pass.
+
+```text
+python -m scripts.verify_publication_ledger run --manifest <manifest.json> --execute --confirm "RUN <RUN>" --evidence <new-run.jsonl>
+```
+
+The suite uses two namespaced synthetic postings and the actual production normalizer,
+repository, ingestion composition and default dispatcher with real SDK clients. Only
+test-client wrappers inject faults and count SDK calls; no production code or endpoints
+are altered. Evidence records query IDs, broker IDs, counters and synthetic snapshots.
+It never consumes a subscription or claims worker completion.
+
+| Scenario | Required result |
+|---|---|
+| Forced pre-COMMIT assertion | HTTP-style 502, zero raw/ledger rows and zero publication |
+| First ingestion after rollback | `inserted=2`, `recovered=0`, `published=2`, no failures; both raw rows `NEW_RAW`, ledger `PUBLISHED` |
+| Identical repeat | `inserted=0`, `recovered=0`, `published=0`; zero additional SDK sends and unchanged rows/IDs |
+| Lost real persistence/checkpoint response | Original query-ID lookup, real committed state recovered, two sends total |
+| Real checkpoint contention | An actual transaction-abort response, holder rollback/termination, checkpoint retry with no resend |
+| One lease expires before checkpoint | One confirmation remains durable; only the unresolved job republishes on recovery |
+| Crash after broker ACK before checkpoint | Both remain `IN_FLIGHT`; test-only lease expiry permits at-least-once recovery, then repeats send zero |
+| Concurrent ingestion | Two raw identities, two publication identities, two sends; final repeat sends zero |
+
+Before each independent scenario, the suite archives snapshots and resets only the two
+manifest-listed test tables after verifying their job IDs. This is test-fixture setup,
+never a production reset mechanism. The subscription retains synthetic messages throughout.
+The lock-holder test uses a real BigQuery session, bounds the checkpoint wait to 60 seconds,
+and journals its session ID. If interrupted, an operator must inspect that session and
+explicitly roll it back/terminate it before cleanup. A conflict that is not actually
+observed fails the test; the tool does not substitute a mocked abort.
+
+### Cost, stop conditions and cleanup
+
+Bounds are 100 submitted query jobs, 16 SDK publication attempts and 900 seconds of active
+execution. Query configurations set a 1-GiB maximum-bytes limit and a 60-second job timeout;
+these service settings are not a guaranteed aggregate spend or cancellation boundary.
+BigQuery scripts have child-statement/temporary-storage charges, and an RPC timeout may
+leave a job running. Use query IDs to resolve those outcomes before cleanup. Initial cost
+target: below US$1, typically cents for these tiny tables, subject to actual billing,
+regional pricing, minimum billing units and available allowances. No Apify, embeddings,
+LLMs or Cloud Run execution is included. Budget counters are local to one suite invocation;
+re-running a suite requires fresh evidence and a renewed review of total spend.
+
+The tool stops on mismatched metadata, unknown jobs/rows, assertion failures, unresolved
+queries or exhausted limits. It retains evidence and does not automatically delete failed
+resources. After review, resolve outstanding jobs/sessions and authorize cleanup:
+
+```powershell
+.\venv\Scripts\python.exe -m scripts.verify_publication_ledger cleanup --manifest .local/ledger-it/manifest.json --execute --confirm "CLEANUP <RUN>" --evidence .local/ledger-it/cleanup.jsonl
+```
+
+Cleanup verifies every existing resource label, table name and topic attachment before
+deleting anything. It supports partial provisioning, deletes only the dedicated subscription,
+topic and dataset, and refuses unexpected tables/subscriptions. Deleting that subscription
+removes its synthetic backlog; it never deletes, reads or ACKs existing production messages.
+The operator separately removes the temporary IAM bindings and deletes the exact test service
+account after reviewing its ownership and remaining use. Keep sanitized evidence outside
+the expiring dataset. Cleanup does not undo broker acceptance or prove a timed-out job ended.
+
+### Production activation remains separately approved
+
+Passing this suite does not authorize migration or activation. Pin the reviewed image/source,
+verify production schemas/IAM and subscribers, stop legacy writers/reconciliation, and use
+the evidence-first 113-job manifest above. Only the production ledger changes: preserve the
+113 raw rows/statuses and existing messages; unknown per-job publication history stays UNKNOWN.
+Check that none of those historical entries is automatically eligible before enabling the
+flag consistently on reviewed ingestion writers. Do not deploy workers or consume the backlog.
+
+Rollback starts by stopping ingress/reconciliation and resolving in-flight query outcomes.
+Preserve all ledger evidence. Disabling the flag while accepting traffic restores legacy
+NEW_RAW republication; it is not a safe publication rollback. Never clear ledger states,
+delete historical rows or purge messages to conceal an incomplete cutover.

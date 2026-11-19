@@ -833,6 +833,34 @@ def test_verbose_console_separates_headers_and_wraps_metadata():
     assert "\n" not in production and json.loads(production) == original
 
 
+@pytest.mark.asyncio
+async def test_startup_reports_effective_bigquery_location_without_a_webhook(monkeypatch, caplog):
+    caplog.set_level(logging.INFO, logger="ingestion.events")
+    configured = _make_test_settings()
+    configured.bq_location = "US"
+    configured.publication_ledger_enabled = False
+    monkeypatch.setattr(receiver, "get_settings", lambda: configured)
+    monkeypatch.setattr(receiver, "setup_observability", MagicMock())
+    monkeypatch.setattr(receiver, "flush_observability", MagicMock())
+    with patch.object(receiver, "RawJobRepository") as repository:
+        async with receiver.lifespan(receiver.app):
+            pass
+    repository.assert_not_called()
+    runtime = next(r for r in events(caplog) if r["event"] == "ingestion.runtime.configured")
+    assert runtime["bq_location"] == "US" and runtime["ledger_enabled"] is False
+    assert "BigQuery location=US; ledger=disabled" in IngestionFormatter(
+        None, development=True,
+    ).format(next(r for r in caplog.records if getattr(r, "event", None) == "ingestion.runtime.configured"))
+
+
+def test_runtime_config_does_not_render_arbitrary_location_contents(caplog):
+    caplog.set_level(logging.INFO, logger="ingestion.events")
+    emit("ingestion.runtime.configured", bq_location="SECRET_LOCATION_CANARY", ledger_enabled=False)
+    runtime = next(r for r in events(caplog) if r["event"] == "ingestion.runtime.configured")
+    assert runtime["bq_location"] == "unrecognized"
+    assert "SECRET_LOCATION_CANARY" not in caplog.text
+
+
 TERMINAL_EVENTS = {
     "ingestion.completed",
     "ingestion.failed",
@@ -1000,7 +1028,10 @@ def test_compact_info_shows_long_stage_starts_and_cancellation():
             "[Pub/Sub] Publishing jobs...",
             "[BigQuery] Ingestion cancelled; persistence unconfirmed, stored row count unknown",
         ]
-        assert len(text.splitlines()) == 7
+        headers = [line for line in text.splitlines() if not line.startswith("    ")]
+        assert len(headers) == 7
+        assert sum(" INFO " in line for line in headers) == 6
+        assert "tests/services/test_ingestion_logging.py:" in text
         assert [text.index(part) for part in expected] == sorted(
             text.index(part) for part in expected
         )

@@ -25,6 +25,8 @@ import time
 from collections.abc import Callable, Coroutine
 from typing import Any, TypeVar
 
+from observability.diagnostics import caller_source, exception_fields
+
 logger = logging.getLogger(__name__)
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -36,6 +38,8 @@ def _log_retry(
 ) -> None:
     """Log metadata only; exception messages can contain credentials or row contents."""
     fields = {
+        **exception_fields(error),
+        "source": caller_source(2),
         "operation": operation,
         "attempt": attempt,
         "max_attempts": maximum,
@@ -54,6 +58,7 @@ def _log_retry(
         fields["retry_delay_ms"],
         fields["outcome"],
         extra={"retry_fields": fields},
+        stacklevel=2,
     )
 
 

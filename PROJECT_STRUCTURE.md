@@ -16,7 +16,7 @@ are added, removed, or renamed.
 | `schemas/` | `job_models.py`, `routing_models.py`, `scoring_models.py`, `research_models.py`, `diligence_models.py`, `reflection_models.py`, `profile_models.py`: Pydantic contracts. |
 | `repositories/` | `interfaces.py`: protocols; `raw_jobs_repo.py`, `embeddings_repo.py`, `evaluated_repo.py`, `actions_repo.py`, `profiles_repo.py`: concrete BigQuery adapters. Named upserts/protocols have unresolved integrity gaps. |
 | `gateway/` | `client.py`: Instructor chat wrapper and direct Vertex embedding adapter; `litellm_config.yaml`: configured chat aliases, fallbacks/callbacks/limits. Proxy embedding routing is not implemented. |
-| `observability/` | `setup.py`: Langfuse initialization, decorator re-export, flush, metadata and scoring helpers. Privacy/correlation enforcement remains incomplete. |
+| `observability/` | `setup.py`: Langfuse initialization, flush, metadata and scoring helpers. `ingestion_logging.py`: correlated events and console/JSON formatting. `diagnostics.py`: relative source/failure frames and allowlisted dependency metadata. Langfuse privacy/correlation enforcement remains incomplete. |
 | `tools/` | `search_tools.py`: Custom Search/page fetch; `cache_tools.py`: Firestore research cache; `history_tools.py`: current BigQuery history query; `e2b_tools.py`: sandbox execution. |
 | `config/` | `settings.py`: environment/default settings and secret resolution. |
 | `utils/` | `ids.py`, `retry.py`, `time.py`: generic identity, backoff and timestamp helpers. |
@@ -34,6 +34,7 @@ are added, removed, or renamed.
 | [schemas/publication_models.py](schemas/publication_models.py) | Typed persistence outcomes, publication identity and claims |
 | [sql/job_publications.sql](sql/job_publications.sql) | Sidecar ledger DDL; separate reviewed deployment required |
 | [scripts/plan_publication_migration.py](scripts/plan_publication_migration.py) | Offline evidence-first manifest generation; never applies migration |
+| [scripts/verify_publication_ledger.py](scripts/verify_publication_ledger.py) | Opt-in isolated GCP integration CLI; offline plan, separately confirmed provision/check/run/cleanup; excluded from production images |
 | [docs/ingestion-publications.md](docs/ingestion-publications.md) | Rollout gates, legacy migration and reliability limits |
 | [services/user_profile_service.py](services/user_profile_service.py) | FastAPI profile write endpoint and health route |
 | [services/tier1_matcher_runner.py](services/tier1_matcher_runner.py) | Async `main()` and per-user runner; daily scheduling intent is Unverified |

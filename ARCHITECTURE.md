@@ -99,6 +99,14 @@ See [rollout and contracts](docs/ingestion-publications.md) and mocked
 [reliability tests](tests/services/test_publication_reliability.py). HTTP reconciliation
 now requires an explicitly configured `RECONCILIATION_SECRET`, independently of the flag.
 
+**Implemented tooling, live behavior Unverified:**
+`scripts/verify_publication_ledger.py` prepares an offline resource/source manifest and
+separately gates isolated provisioning, metadata checks, real SDK scenarios and cleanup.
+It reuses normalization, persistence, ingestion composition and the default dispatcher;
+it neither invokes Apify nor consumes subscriptions nor activates production flags.
+Execution requires scoped IAM review and Python 3.11. The integration tool, local
+environments, credentials and fixtures are excluded from the production Docker context.
+
 ## Model access
 
 **Implemented:** [agents/base.py](agents/base.py) defines an abstract Python
@@ -257,6 +265,17 @@ agent methods are decorated; `_call_llm()` itself is not. Gateway/proxy callback
 `langfuse` while setup adds `langfuse_otel`. Privacy controls, callback duplication,
 SDK compatibility and reliable trace linkage are **Unverified**. Flushing exists but
 is not called by every service lifecycle. See S-5 and S-9 before expanding capture.
+
+**Implemented:** ingestion events retain stable names, request correlation and compact
+INFO summaries. `observability/diagnostics.py` supplies relative emitter and application
+failure locations, skipping SDK/retry infrastructure frames. Named dependency boundaries
+distinguish BigQuery duplicate checking from streaming insertion. Only allowlisted status,
+reason and explicit job-ID metadata is captured; exception messages, SQL and frame locals
+are excluded. WARN/ERROR consoles show concise diagnostics; JSON/file output keeps the
+structured metadata. Retry classification is diagnostic only: this does not change the
+legacy retry policy or establish the cause/outcome of a historical BigQuery failure.
+The receiver also emits its effective BigQuery location and ledger flag at startup,
+before any webhook, without constructing a repository or exposing other settings.
 
 [ReflectionAgent](agents/reflection_agent.py) reads 30-day feedback and accepted
 embeddings, computes `(1 - alpha) * e_resume + alpha * accepted_centroid`, and gradually

@@ -13,7 +13,8 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
+
+from observability.diagnostics import caller_source, exception_fields, location_text, safe_location
 
 COUNTERS = (
     "received",
@@ -91,11 +92,12 @@ def stage(name: str) -> None:
 
 
 def emit(event: str, level: int = logging.INFO, **fields: object) -> None:
-    record = _event_fields(event, level, fields)
+    record = _event_fields(event, level, {**fields, "source": caller_source(2)})
     _logger.log(
         level,
         json.dumps(record, separators=(",", ":")),
         extra={"event": event, "event_fields": record},
+        stacklevel=2,
     )
 
 
@@ -119,7 +121,25 @@ def _event_fields(event: str, level: int, fields: dict[str, object]) -> dict[str
     if state and state.source_run_status in ("SUCCEEDED", "ABORTED"):
         record["source_run_status"] = state.source_run_status
     for key, value in fields.items():
-        if key in COUNTERS and (value is None or type(value) is int):
+        if key == "bq_location":
+            record[key] = (
+                identifier(value)
+                if isinstance(value, str) and (
+                    value in {"US", "EU", "GLOBAL"}
+                    or re.fullmatch(r"[A-Za-z]+(?:-[A-Za-z]+)+[0-9]+", value)
+                ) else "unrecognized"
+            )
+        elif key in {"source", "failure_site"}:
+            location = safe_location(value)
+            if location and not any(
+                secret in str(location) for secret in (state.secrets if state else [])
+            ):
+                record[key] = location
+        elif (key == "error_location" and isinstance(value, str)
+              and value == location_text(fields.get("failure_site"))
+              and not any(secret in value for secret in (state.secrets if state else []))):
+            record[key] = value
+        elif key in COUNTERS and (value is None or type(value) is int):
             record[key] = value
             if state:
                 state.counters[key] = value
@@ -135,12 +155,13 @@ def _event_fields(event: str, level: int, fields: dict[str, object]) -> dict[str
                 "publication_pending",
                 "publication_in_flight",
                 "publication_unknown",
+                "dependency_status",
             }
             and type(value) is int
         ):
             record[key] = value
         elif (
-            key in {"verified", "allowlist_enforced", "authentication_required"}
+            key in {"verified", "allowlist_enforced", "authentication_required", "ledger_enabled"}
             and type(value) is bool
         ):
             record[key] = value
@@ -155,21 +176,17 @@ def _event_fields(event: str, level: int, fields: dict[str, object]) -> dict[str
             "persistence_outcome",
             "subscriber_processing",
             "query_job_id",
+            "dependency",
+            "dependency_operation",
+            "dependency_reason",
+            "retry_classification",
         }:
             record[key] = identifier(value)
     return record
 
 
-def error_fields(error: BaseException) -> dict[str, str | None]:
-    cause = error.__cause__ or error
-    frame = cause.__traceback__
-    location = None
-    if frame:
-        while frame.tb_next:
-            frame = frame.tb_next
-        code = frame.tb_frame.f_code
-        location = identifier(f"{Path(code.co_filename).name}:{frame.tb_lineno}:{code.co_name}")
-    return {"error_type": identifier(type(cause).__name__), "error_location": location}
+def error_fields(error: BaseException) -> dict[str, object]:
+    return exception_fields(error)
 
 
 _STAGE_LABELS = {
@@ -196,6 +213,10 @@ def _compact_summary(fields: dict[str, object]) -> tuple[str, str]:
         value = fields.get(key)
         return value if type(value) is int else "unknown"
 
+    if event == "ingestion.runtime.configured":
+        flag = fields.get("ledger_enabled")
+        ledger = "enabled" if flag is True else "disabled" if flag is False else "unknown"
+        return "Config", f"BigQuery location={fields.get('bq_location', 'unknown')}; ledger={ledger}"
     if event == "ingestion.webhook.received":
         return "Apify", "Webhook received"
     if event == "ingestion.actor.verification_started":
@@ -336,7 +357,7 @@ class IngestionFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         fields = getattr(record, "event_fields", None)
-        if record.name == "utils.retry" and context() is not None:
+        if record.name == "utils.retry":
             retry = getattr(record, "retry_fields", None)
             if isinstance(retry, dict):
                 fields = _event_fields("ingestion.operation.retry", record.levelno, retry)
@@ -372,6 +393,25 @@ class IngestionFormatter(logging.Formatter):
             if record.levelno >= logging.WARNING and fields.get("request_id"):
                 summary += f" [{str(fields['request_id'])[:8]}]"
             line = f"{timestamp} {severity:<5} [{label}] {summary}"
+            if record.levelno >= logging.WARNING:
+                diagnostic = []
+                operation = fields.get("dependency_operation") or fields.get("operation")
+                if operation:
+                    diagnostic.append(str(operation))
+                site = location_text(fields.get("failure_site")) or location_text(fields.get("source"))
+                if site:
+                    diagnostic.append(site)
+                if fields.get("dependency_status") is not None:
+                    diagnostic.append(f"HTTP {fields['dependency_status']}")
+                if fields.get("dependency_reason"):
+                    diagnostic.append(str(fields["dependency_reason"]))
+                if fields.get("retry_classification"):
+                    diagnostic.append(f"classification={fields['retry_classification']}")
+                if diagnostic:
+                    line += "\n" + textwrap.fill(
+                        " | ".join(diagnostic), width=100, initial_indent="    ",
+                        subsequent_indent="    ", break_long_words=False, break_on_hyphens=False,
+                    )
             if (
                 fields.get("event") == "ingestion.completed"
                 and type(fields.get("published")) is int

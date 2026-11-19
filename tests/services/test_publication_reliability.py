@@ -978,6 +978,136 @@ async def test_claim_count_keeps_later_pages_reachable_when_sends_are_skipped(mo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "attempted_on_first_page,expire_before_claim,limit,expected_limits",
+    [
+        (100, False, 200, [100, 100]),
+        (40, False, 200, [100, 100]),
+        (0, False, 200, [100, 100]),
+        (0, True, 200, [100, 100]),
+        (40, True, 113, [100, 13]),
+    ],
+)
+async def test_reconciliation_pages_by_claims_not_send_attempts(
+    monkeypatch, attempted_on_first_page, expire_before_claim, limit, expected_limits,
+):
+    from services import publication_dispatcher as dispatcher
+
+    ledger = MemoryLedger()
+    for index in range(113):
+        job_id = f"job-{index:03}"
+        ledger.add(job_id)
+        if expire_before_claim:
+            ledger.rows[job_id].update(state="IN_FLIGHT", until=-1, token="expired", attempts=1)
+    original_ownership = ledger.check_ownership
+    original_claim = ledger.claim_pending
+    pages, limits = [], []
+
+    async def claim(job_ids=None, limit=100, min_age_seconds=0, **kwargs):
+        limits.append(limit)
+        result = await original_claim(job_ids, limit, min_age_seconds, **kwargs)
+        pages.append([item.job_id for item in result])
+        return result
+
+    async def ownership(claims, **kwargs):
+        owners = await original_ownership(claims, **kwargs)
+        return [owner for owner in owners if
+                int(owner.job_id.removeprefix("job-")) >= 100 or
+                int(owner.job_id.removeprefix("job-")) < attempted_on_first_page]
+
+    ledger.claim_pending = claim
+    ledger.check_ownership = ownership
+    real_dispatch = dispatcher.dispatch_pending
+    send = AsyncMock(side_effect=lambda job_id: f"ack-{job_id}")
+
+    async def dispatch(repository, **kwargs):
+        return await real_dispatch(repository, publish_one=send, **kwargs)
+
+    monkeypatch.setattr(dispatcher, "dispatch_pending", dispatch)
+    monkeypatch.setattr(apify_receiver, "get_settings", settings)
+    result = await apify_receiver.reconcile_unpublished_jobs(
+        repo=MagicMock(publications=ledger), limit=limit,
+    )
+    expected_attempts = attempted_on_first_page + 13
+    assert limits == expected_limits
+    assert [len(page) for page in pages] == [100, 13]
+    assert len(set(pages[0] + pages[1])) == 113
+    assert result["reconciled"] == result["published"] == send.await_count == expected_attempts
+    assert result["publish_failures"] == 0
+    assert len(result["job_ids"]) == len(set(result["job_ids"])) == expected_attempts
+    expected_claims = 2 if expire_before_claim else 1
+    assert all(row["attempts"] == expected_claims for row in ledger.rows.values())
+    assert all(ledger.rows[job_id]["state"] == "PUBLISHED" for job_id in pages[1])
+
+
+@pytest.mark.asyncio
+async def test_zero_send_pages_exhaust_only_bounded_claim_budget_without_reselection(monkeypatch):
+    from services import publication_dispatcher as dispatcher
+
+    ledger = MemoryLedger()
+    for index in range(1200):
+        ledger.add(f"job-{index:04}")
+    original_claim = ledger.claim_pending
+    selected = []
+
+    async def claim(*args, **kwargs):
+        result = await original_claim(*args, **kwargs)
+        selected.append([item.job_id for item in result])
+        return result
+
+    ledger.claim_pending = claim
+    ledger.check_ownership = AsyncMock(return_value=[])
+    real_dispatch = dispatcher.dispatch_pending
+    send = AsyncMock()
+
+    async def dispatch(repository, **kwargs):
+        return await real_dispatch(repository, publish_one=send, **kwargs)
+
+    monkeypatch.setattr(dispatcher, "dispatch_pending", dispatch)
+    monkeypatch.setattr(apify_receiver, "get_settings", settings)
+    repo = MagicMock(publications=ledger)
+    first = await apify_receiver.reconcile_unpublished_jobs(repo=repo, limit=1000)
+    assert first == {"reconciled": 0, "published": 0, "publish_failures": 0, "job_ids": []}
+    assert len(selected) == 10 and all(len(page) == 100 for page in selected)
+    assert sum(row["state"] == "PENDING" for row in ledger.rows.values()) == 200
+    await apify_receiver.reconcile_unpublished_jobs(repo=repo, limit=200)
+    assert len(selected) == 12
+    ids = [job_id for page in selected for job_id in page]
+    assert len(ids) == len(set(ids)) == 1200
+    await apify_receiver.reconcile_unpublished_jobs(repo=repo, limit=1000)
+    assert len(selected) == 13 and selected[-1] == []
+    send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_failed_publications_do_not_reselect_deferred_ids_on_remaining_pages(monkeypatch):
+    from services import publication_dispatcher as dispatcher
+
+    ledger = MemoryLedger()
+    for index in range(113):
+        ledger.add(f"job-{index:03}")
+    send = AsyncMock(side_effect=TimeoutError("unconfirmed"))
+    real_dispatch = dispatcher.dispatch_pending
+    page_sizes = []
+
+    async def dispatch(repository, **kwargs):
+        result = await real_dispatch(repository, publish_one=send, **kwargs)
+        page_sizes.append(result.claimed_count)
+        return result
+
+    monkeypatch.setattr(dispatcher, "dispatch_pending", dispatch)
+    monkeypatch.setattr(apify_receiver, "get_settings", settings)
+    result = await apify_receiver.reconcile_unpublished_jobs(
+        repo=MagicMock(publications=ledger), limit=1000,
+    )
+    assert page_sizes == [100, 13]
+    assert result["reconciled"] == result["publish_failures"] == send.await_count == 113
+    assert result["published"] == 0 and len(set(result["job_ids"])) == 113
+    assert all(row["state"] == "PENDING" and row["until"] > ledger.now
+               for row in ledger.rows.values())
+
+
+@pytest.mark.asyncio
 async def test_raw_sql_expressions_match_every_checked_in_field():
     import re
     from schemas.job_models import RawJob

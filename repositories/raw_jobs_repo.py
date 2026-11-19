@@ -18,6 +18,7 @@ from google.cloud.exceptions import NotFound
 
 from config.settings import Settings, get_settings
 from observability.ingestion_logging import emit
+from observability.diagnostics import diagnostic_operation
 from schemas.job_models import JobStatus, RawJob
 from schemas.publication_models import BatchInsertResult, QueryOutcomeUnconfirmed
 from utils.retry import async_retry
@@ -191,7 +192,8 @@ class RawJobRepository:
                 bigquery.ArrayQueryParameter("ids", "STRING", ids),
             ]
         )
-        existing = {row.job_id for row in self._client.query_and_wait(query, job_config=job_config)}
+        with diagnostic_operation("bigquery", "duplicate_check"):
+            existing = {row.job_id for row in self._client.query_and_wait(query, job_config=job_config)}
 
         novel_jobs = [j for j in jobs if j.job_id not in existing]
         if not novel_jobs:
@@ -205,9 +207,10 @@ class RawJobRepository:
 
         rows = [j.model_dump(mode="json") for j in novel_jobs]
         insert_options = {} if retry_insert else {"retry": None}
-        errors = self._client.insert_rows_json(self._table, rows, **insert_options)
-        if errors:
-            raise RuntimeError(f"BQ batch insert errors: {errors}")
+        with diagnostic_operation("bigquery", "streaming_insert"):
+            errors = self._client.insert_rows_json(self._table, rows, **insert_options)
+            if errors:
+                raise RuntimeError(f"BQ batch insert errors: {errors}")
 
         novel_ids = [j.job_id for j in novel_jobs]
         emit(

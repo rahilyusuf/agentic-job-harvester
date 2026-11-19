@@ -86,6 +86,11 @@ async def lifespan(app: FastAPI):  # type: ignore[type-arg]
     try:
         setup_observability()
         logger.info("apify-receiver started")
+        emit(
+            "ingestion.runtime.configured",
+            bq_location=settings.bq_location,
+            ledger_enabled=settings.publication_ledger_enabled,
+        )
         yield
     finally:
         try:
@@ -120,7 +125,7 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-# starting point
+# 1-starting point
 
 
 @app.post("/webhook/apify", status_code=status.HTTP_202_ACCEPTED)
@@ -678,12 +683,15 @@ async def reconcile_unpublished_jobs(
 
         published = failures = reconciled = 0
         ids = []
+        # Offset is a claim-budget counter, not a SQL OFFSET. Claims leave the
+        # eligible set while leased; bound the loop even when every send is skipped.
         for offset in range(0, limit, 100):
+            page_limit = min(100, limit - offset)
             result = await dispatch_pending(
                 active_repo.publications,
                 project_id=settings.gcp_project_id,
                 topic=settings.pubsub_embedding_topic,
-                limit=min(100, limit - offset),
+                limit=page_limit,
                 min_age_seconds=min_age_seconds,
             )
             ids.extend(result.attempted_ids)
@@ -695,7 +703,7 @@ async def reconcile_unpublished_jobs(
                 if result.claimed_count is not None
                 else len(result.attempted_ids)
             )
-            if claimed_count < min(100, limit - offset):
+            if claimed_count < page_limit:
                 break
         emit(
             "ingestion.recovery.completed",
