@@ -36,7 +36,6 @@ class RawJobRepository:
         settings: Settings | None = None,
     ) -> None:
         settings = settings if settings is not None else get_settings()
-        self._dedup_window_days = settings.dedup_window_days
         self._client = bq_client or bigquery.Client(
             project=settings.gcp_project_id,
             location=settings.bq_location,

@@ -46,7 +46,7 @@ from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from google.cloud import pubsub_v1
 
-from config.settings import get_settings
+from config.settings import Settings, get_settings
 from observability.ingestion_logging import (
     COUNTERS,
     configure_ingestion_logging,
@@ -205,39 +205,8 @@ async def apify_webhook(request: Request) -> dict[str, Any]:
         return result
 
 
-async def _ingest_webhook(request: Request) -> dict[str, Any]:
-    """Receive a success event, or an explicitly enabled aborted-run event.
-
-    The webhook body is a small event payload — NOT the scraped data.
-    This endpoint:
-      1. Validates the HMAC signature (if APIFY_WEBHOOK_SECRET is configured).
-      2. Validates event eligibility and exact agreement with the verified run status.
-      3. Extracts resource.defaultDatasetId.
-      4. Fetches the actual dataset items from the Apify Dataset API.
-      5. Normalizes items into canonical RawJob records.
-      6. Deduplicates and inserts novel jobs into BigQuery.
-      7. Publishes only the newly inserted job_ids to Pub/Sub.
-
-    Expected webhook payload (Apify default template):
-    {
-        "eventType": "ACTOR.RUN.SUCCEEDED",
-        "eventData": {
-            "actorId": "...",
-            "actorRunId": "...",
-            "actorTaskId": "..."    // optional
-        },
-        "resource": {
-            "id": "<actorRunId>",
-            "actId": "<actorId>",
-            "status": "SUCCEEDED",
-            "defaultDatasetId": "<datasetId>",
-            ...
-        }
-    }
-    """
-    settings = get_settings()
-
-    stage("authentication")
+def _register_webhook_secrets(request: Request, settings: Settings) -> None:
+    """Register redaction values only in the existing request-local context."""
     state = context()
     if state:
         state.secrets = [
@@ -265,10 +234,9 @@ async def _ingest_webhook(request: Request) -> dict[str, Any]:
                 if header == "Authorization" and value.startswith("Bearer "):
                     state.secrets.append(value[7:].strip())
 
-    # ── Step 1: Read raw body before any parsing ───────────────────────────────
-    body = await request.body()
 
-    # ── Step 2: Inbound Authentication Enforcement ────────────────────────────
+def _authenticate_webhook(request: Request, body: bytes, settings: Settings) -> None:
+    """Enforce the existing credential checks before parsing the webhook body."""
     if settings.is_production and not settings.apify_webhook_secret:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -309,8 +277,9 @@ async def _ingest_webhook(request: Request) -> dict[str, Any]:
             reason="authentication_not_configured",
         )
 
-    # ── Step 3: Parse JSON body ────────────────────────────────────────────────
-    stage("event_validation")
+
+def _parse_webhook_payload(body: bytes) -> dict[str, Any]:
+    """Decode an object payload while preserving existing HTTP errors."""
     try:
         payload: dict[str, Any] = json.loads(body)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -324,6 +293,134 @@ async def _ingest_webhook(request: Request) -> dict[str, Any]:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Webhook payload must be a JSON object",
         )
+    return payload
+
+
+def _authorize_webhook_actor(actor_id: str, settings: Settings) -> None:
+    """Authorize the payload Actor before checking run-verification configuration."""
+    if settings.apify_allowed_actor_ids and actor_id not in settings.apify_allowed_actor_ids:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Actor ID '{actor_id}' is not authorized",
+        )
+
+    emit("ingestion.actor.authorized", allowlist_enforced=bool(settings.apify_allowed_actor_ids))
+    if not settings.apify_api_token:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Apify API token is not configured. "
+                "Set APIFY_API_TOKEN in .env (local) or the 'apify-api-token' "
+                "Secret Manager secret (production)."
+            ),
+        )
+
+
+async def _verify_webhook_provenance(
+    actor_run_id: str, dataset_id: str, expected_status: str, settings: Settings
+) -> None:
+    """Verify run and dataset provenance before any dataset fetch or writes."""
+    state = context()
+    stage("actor_verification")
+    emit("ingestion.actor.verification_started")
+    verified_run = await _verify_actor_run(actor_run_id, settings.apify_api_token)
+    verified_status = verified_run.get("status")
+    if verified_status != expected_status:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Verified actor run status is '{verified_status}', expected '{expected_status}'",
+        )
+
+    verified_act_id = verified_run.get("actId") or verified_run.get("actorId")
+    if settings.apify_allowed_actor_ids and verified_act_id not in settings.apify_allowed_actor_ids:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Verified actor ID '{verified_act_id}' is not authorized",
+        )
+
+    if state:
+        state.source_run_status = verified_status
+    emit(
+        "ingestion.actor.verified",
+        verified=True,
+        allowlist_enforced=bool(settings.apify_allowed_actor_ids),
+    )
+    stage("dataset_verification")
+    if expected_status == "ABORTED" and (
+        not isinstance(verified_run.get("defaultDatasetId"), str)
+        or not verified_run["defaultDatasetId"].strip()
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Verified aborted run is missing a valid defaultDatasetId",
+        )
+    verified_dataset_id = (verified_run.get("defaultDatasetId") or "").strip()
+    if verified_dataset_id and verified_dataset_id != dataset_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Dataset ID mismatch: payload specifies '{dataset_id}' but run produced '{verified_dataset_id}'",
+        )
+
+    if not verified_dataset_id and state:
+        state.incomplete = True
+    emit(
+        "ingestion.dataset.verified",
+        logging.INFO if verified_dataset_id else logging.WARNING,
+        verified=bool(verified_dataset_id),
+    )
+    if expected_status == "ABORTED":
+        emit(
+            "ingestion.actor.aborted",
+            logging.WARNING,
+            reason="partial_source_dataset",
+        )
+
+
+async def _ingest_webhook(request: Request) -> dict[str, Any]:
+    """Receive a success event, or an explicitly enabled aborted-run event.
+
+    The webhook body is a small event payload — NOT the scraped data.
+    This endpoint:
+      1. Validates the HMAC signature (if APIFY_WEBHOOK_SECRET is configured).
+      2. Validates event eligibility and exact agreement with the verified run status.
+      3. Extracts resource.defaultDatasetId.
+      4. Fetches the actual dataset items from the Apify Dataset API.
+      5. Normalizes items into canonical RawJob records.
+      6. Deduplicates and inserts novel jobs into BigQuery.
+      7. Publishes only the newly inserted job_ids to Pub/Sub.
+
+    Expected webhook payload (Apify default template):
+    {
+        "eventType": "ACTOR.RUN.SUCCEEDED",
+        "eventData": {
+            "actorId": "...",
+            "actorRunId": "...",
+            "actorTaskId": "..."    // optional
+        },
+        "resource": {
+            "id": "<actorRunId>",
+            "actId": "<actorId>",
+            "status": "SUCCEEDED",
+            "defaultDatasetId": "<datasetId>",
+            ...
+        }
+    }
+    """
+    settings = get_settings()
+
+    stage("authentication")
+    state = context()
+    _register_webhook_secrets(request, settings)
+
+    # ── Step 1: Read raw body before any parsing ───────────────────────────────
+    body = await request.body()
+
+    # ── Step 2: Inbound Authentication Enforcement ────────────────────────────
+    _authenticate_webhook(request, body, settings)
+
+    # ── Step 3: Parse JSON body ────────────────────────────────────────────────
+    stage("event_validation")
+    payload = _parse_webhook_payload(body)
 
     # ── Step 4: Validate event type ────────────────────────────────────────────
     event_type: str = payload.get("eventType", "")
@@ -391,77 +488,10 @@ async def _ingest_webhook(request: Request) -> dict[str, Any]:
     stage("actor_authorization")
 
     # ── Step 5b: Actor allowlist authorization ────────────────────────────────
-    if settings.apify_allowed_actor_ids and actor_id not in settings.apify_allowed_actor_ids:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Actor ID '{actor_id}' is not authorized",
-        )
+    _authorize_webhook_actor(actor_id, settings)
 
     # ── Step 6: Verify actor run directly with Apify API ───────────────────────
-    emit("ingestion.actor.authorized", allowlist_enforced=bool(settings.apify_allowed_actor_ids))
-    if not settings.apify_api_token:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=(
-                "Apify API token is not configured. "
-                "Set APIFY_API_TOKEN in .env (local) or the 'apify-api-token' "
-                "Secret Manager secret (production)."
-            ),
-        )
-
-    stage("actor_verification")
-    emit("ingestion.actor.verification_started")
-    verified_run = await _verify_actor_run(actor_run_id, settings.apify_api_token)
-    verified_status = verified_run.get("status")
-    if verified_status != expected_status:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Verified actor run status is '{verified_status}', expected '{expected_status}'",
-        )
-
-    verified_act_id = verified_run.get("actId") or verified_run.get("actorId")
-    if settings.apify_allowed_actor_ids and verified_act_id not in settings.apify_allowed_actor_ids:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Verified actor ID '{verified_act_id}' is not authorized",
-        )
-
-    if state:
-        state.source_run_status = verified_status
-    emit(
-        "ingestion.actor.verified",
-        verified=True,
-        allowlist_enforced=bool(settings.apify_allowed_actor_ids),
-    )
-    stage("dataset_verification")
-    if expected_status == "ABORTED" and (
-        not isinstance(verified_run.get("defaultDatasetId"), str)
-        or not verified_run["defaultDatasetId"].strip()
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Verified aborted run is missing a valid defaultDatasetId",
-        )
-    verified_dataset_id = (verified_run.get("defaultDatasetId") or "").strip()
-    if verified_dataset_id and verified_dataset_id != dataset_id:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Dataset ID mismatch: payload specifies '{dataset_id}' but run produced '{verified_dataset_id}'",
-        )
-
-    if not verified_dataset_id and state:
-        state.incomplete = True
-    emit(
-        "ingestion.dataset.verified",
-        logging.INFO if verified_dataset_id else logging.WARNING,
-        verified=bool(verified_dataset_id),
-    )
-    if expected_status == "ABORTED":
-        emit(
-            "ingestion.actor.aborted",
-            logging.WARNING,
-            reason="partial_source_dataset",
-        )
+    await _verify_webhook_provenance(actor_run_id, dataset_id, expected_status, settings)
     stage("dataset_fetch")
     emit("ingestion.dataset.fetch_started")
     raw_items = await _fetch_dataset_items(dataset_id, settings.apify_api_token)
