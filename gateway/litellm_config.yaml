@@ -61,9 +61,9 @@ router_settings:
   cooldown_time: 30  # seconds to wait before re-routing to a failed model
 
 litellm_settings:
-  # LangFuse callback — auto-logs all prompts/tokens/latency
-  success_callback: ["langfuse"]
-  failure_callback: ["langfuse"]
+  # Native application observations own Langfuse capture; no automatic payload export.
+  success_callback: []
+  failure_callback: []
   langfuse_public_key: "os.environ/LANGFUSE_PUBLIC_KEY"
   langfuse_secret_key: "os.environ/LANGFUSE_SECRET_KEY"
   langfuse_host: "os.environ/LANGFUSE_HOST"

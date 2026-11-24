@@ -259,12 +259,20 @@ while updating documentation; design compatibility/migrations first.
 
 ## Observability and reflection
 
-**Implemented:** [observability/setup.py](observability/setup.py) re-exports `observe`,
-initializes Langfuse callbacks, provides flushing, and calls `create_score()`. Public
-agent methods are decorated; `_call_llm()` itself is not. Gateway/proxy callbacks use
-`langfuse` while setup adds `langfuse_otel`. Privacy controls, callback duplication,
-SDK compatibility and reliable trace linkage are **Unverified**. Flushing exists but
-is not called by every service lifecycle. See S-5 and S-9 before expanding capture.
+**Implemented:** `observability/setup.py` preserves named sync/async agent decorators
+using native Langfuse 4 span observations without argument/result or exception-content
+capture. The gateway creates one child generation per logical Instructor invocation;
+this is not a count of provider requests or verified token/cost accounting. Controlled
+metadata is allowlisted and explicit identifiers are hashed. Telemetry entry/update/exit,
+feedback and flush errors are best-effort; business failures and cancellation propagate.
+Application-owned automatic Langfuse callbacks are removed without replacing unrelated
+LiteLLM callbacks. The proxy YAML disables its automatic Langfuse callbacks; a separately
+running proxy must be checked independently. No model/provider routing changes occur.
+
+**Unverified:** live SDK/proxy export and deployed configuration, reliable end-to-end
+trace linkage and feedback ownership. Current application UUID metadata does not establish
+an SDK trace context. Flushing is not called by every service lifecycle. See S-5 and S-9;
+this P0 correction does not close those broader findings.
 
 **Implemented:** ingestion events retain stable names, request correlation and compact
 INFO summaries. `observability/diagnostics.py` supplies relative emitter and application
