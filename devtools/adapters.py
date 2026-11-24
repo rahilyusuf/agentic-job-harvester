@@ -1,10 +1,28 @@
 """Actual adapters: metadata-only checks and explicitly requested bounded writes."""
 
 import asyncio
+import os
 
 from devtools.config import DATASET, LOCATION, PROJECT, SUBSCRIPTION, TABLE, TOPIC
 from devtools.schemas import GCPStatus, PubSubStatus
 from schemas.job_models import RawJob
+
+
+def _publication_settings():
+    """Respect explicit dev process configuration without resolving production secrets."""
+    from pydantic import TypeAdapter
+
+    from config.settings import Settings
+
+    return Settings.model_construct(
+        gcp_project_id=PROJECT,
+        bq_dataset=DATASET,
+        bq_location=LOCATION,
+        pubsub_embedding_topic=TOPIC,
+        publication_ledger_enabled=TypeAdapter(bool).validate_python(
+            os.environ.get("PUBLICATION_LEDGER_ENABLED", "false")
+        ),
+    )
 
 
 class GoogleCloudOperations:
@@ -102,22 +120,18 @@ class GoogleCloudOperations:
     async def insert_once(self, jobs: list[RawJob]) -> list[str]:
         from google.cloud import bigquery
 
-        from config.settings import Settings
         from repositories.raw_jobs_repo import RawJobRepository
 
         if len(jobs) > 3 or len({job.job_id for job in jobs}) != len(jobs):
             raise ValueError("Invalid test batch")
+
+        settings = _publication_settings()
 
         def insert() -> list[str]:
             client = bigquery.Client(project=PROJECT, location=LOCATION)
             try:
                 # Constructing Settings normally resolves unrelated production secrets.
                 # All resource values below are fixed, preverified allowlist constants.
-                settings = Settings.model_construct(
-                    gcp_project_id=PROJECT,
-                    bq_dataset=DATASET,
-                    bq_location=LOCATION,
-                )
                 repo = RawJobRepository(bq_client=client, dataset=DATASET, settings=settings)
                 return asyncio.run(repo.batch_insert_jobs_once(jobs))
             finally:
@@ -126,6 +140,19 @@ class GoogleCloudOperations:
         return await asyncio.to_thread(insert)
 
     async def publish(self, job_ids: list[str]) -> tuple[int, int]:
+        settings = _publication_settings()
+        if settings.publication_ledger_enabled:
+            from repositories.publications_repo import PublicationRepository
+            from services.publication_dispatcher import dispatch_pending
+
+            repo = PublicationRepository(settings=settings)
+            try:
+                result = await dispatch_pending(
+                    repo, project_id=PROJECT, topic=TOPIC, job_ids=job_ids
+                )
+                return len(result.confirmed), len(result.unconfirmed_ids)
+            finally:
+                repo.client.close()
         from services.apify_receiver import _publish_job_ids
 
         return await _publish_job_ids(job_ids, project_id=PROJECT, topic=TOPIC)

@@ -12,9 +12,8 @@ Model: "deep-pro" (weekly, cost-tolerant — this run happens once per week)
 from __future__ import annotations
 
 import logging
-import numpy as np
-from datetime import timezone
 
+import numpy as np
 from google.cloud import firestore
 
 from agents.base import BaseIntelligenceAgent
@@ -169,7 +168,7 @@ class ReflectionAgent(BaseIntelligenceAgent):
         object.__setattr__(rules, "reflection_trace_id", trace_id)
 
         # Step 5: Persist centroid
-        if centroid_updated:
+        if centroid_updated and new_centroid is not None:
             await self._profile_repo.update_active_centroid(
                 user_id=user_id,
                 new_centroid=new_centroid,

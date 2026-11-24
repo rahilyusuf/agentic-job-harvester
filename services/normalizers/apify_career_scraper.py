@@ -1,4 +1,4 @@
-﻿"""services/normalizers/apify_career_scraper.py
+"""services/normalizers/apify_career_scraper.py
 
 Normalizes one raw dataset item produced by the Apify
 Company Career Page Scraper actor into the canonical RawJob model.
@@ -31,6 +31,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from observability.ingestion_logging import emit
 from orchestration.input_sanitizer import sanitize_job_fields
 from schemas.job_models import RawJob
 from utils.ids import compute_job_id
@@ -92,12 +93,17 @@ def normalize(item: object) -> RawJob | None:
     Malformed record shapes, field types and validation failures are skipped.
     """
     if not isinstance(item, dict):
-        logger.warning("Skipping malformed item: expected an object, got %s", type(item).__name__)
+        emit("ingestion.record.rejected", logging.DEBUG, reason="non_object")
         return None
     try:
         return _normalize_item(item)
     except (TypeError, ValueError) as exc:
-        logger.warning("Skipping malformed item: %s", type(exc).__name__)
+        emit(
+            "ingestion.record.rejected",
+            logging.DEBUG,
+            reason="invalid_field",
+            error_type=type(exc).__name__,
+        )
         return None
 
 
@@ -105,18 +111,8 @@ def _normalize_item(item: dict[str, Any]) -> RawJob | None:
     """Normalize a source object inside the public per-record validation boundary."""
     job_url, used_fallback = resolve_job_url(item)
     if not job_url:
-        logger.warning(
-            "Skipping item with missing jobUrl and applyUrl: title=%s",
-            item.get("title"),
-        )
+        emit("ingestion.record.rejected", logging.DEBUG, reason="missing_or_invalid_url")
         return None
-
-    if used_fallback:
-        logger.debug(
-            "Using applyUrl fallback for item: title=%s url=%s",
-            item.get("title"),
-            job_url,
-        )
 
     # Determine the stable job identifier.
     # The scraper provides its own jobId (e.g. "workable-<uuid>") which is
@@ -126,14 +122,12 @@ def _normalize_item(item: dict[str, Any]) -> RawJob | None:
     job_id = compute_job_id(job_url, ats_id=ats_id)
 
     # Prefer plain-text description for embedding; fall back to HTML as last resort.
-    description = (_text_field(item, "descriptionText") or _text_field(item, "descriptionHtml")).strip()
+    description = (
+        _text_field(item, "descriptionText") or _text_field(item, "descriptionHtml")
+    ).strip()
 
     if len(description) < _MIN_DESCRIPTION_LEN:
-        logger.warning(
-            "Skipping item with description too short (%d chars): job_url=%s",
-            len(description),
-            job_url,
-        )
+        emit("ingestion.record.rejected", logging.DEBUG, reason="short_description")
         return None
 
     # Parse postedAt — ISO 8601 from the scraper, optional.
@@ -169,24 +163,14 @@ def _normalize_item(item: dict[str, Any]) -> RawJob | None:
     clean_title = (sanitized["title"] or "").strip()
     clean_company = (sanitized["company"] or "").strip()
     if not clean_title or not clean_company:
-        logger.warning(
-            "Skipping item with empty or invalidated title/company: title=%r company=%r job_url=%s",
-            clean_title,
-            clean_company,
-            job_url,
-        )
+        emit("ingestion.record.rejected", logging.DEBUG, reason="missing_title_or_company")
         return None
 
     clean_description = (sanitized["description"] or "").strip()
     # Content quality check: ensure residual content beyond removed patterns meets the length threshold
     effective_content = clean_description.replace("[REMOVED]", "").strip()
     if len(effective_content) < _MIN_DESCRIPTION_LEN:
-        logger.warning(
-            "Skipping item with sanitized description too short (%d effective chars, min %d): job_url=%s",
-            len(effective_content),
-            _MIN_DESCRIPTION_LEN,
-            job_url,
-        )
+        emit("ingestion.record.rejected", logging.DEBUG, reason="short_sanitized_description")
         return None
 
     try:
@@ -205,10 +189,11 @@ def _normalize_item(item: dict[str, Any]) -> RawJob | None:
             ats_platform=ats_platform,
         )
     except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "Skipping malformed item: job_url=%s error=%s",
-            job_url,
-            exc,
+        emit(
+            "ingestion.record.rejected",
+            logging.DEBUG,
+            reason="invalid_raw_job",
+            error_type=type(exc).__name__,
         )
         return None
 
@@ -224,5 +209,5 @@ def _parse_iso_dt(value: object) -> datetime | None:
         normalized = value.strip().replace("Z", "+00:00")
         return datetime.fromisoformat(normalized).astimezone(timezone.utc)
     except (ValueError, OverflowError, OSError):
-        logger.debug("Could not parse datetime value: %r", value)
+        emit("ingestion.record.date_ignored", logging.DEBUG, reason="invalid_optional_date")
         return None

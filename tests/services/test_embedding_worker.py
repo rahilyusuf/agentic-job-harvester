@@ -10,7 +10,7 @@ import pytest
 from starlette.requests import Request
 
 from schemas.job_models import JobStatus, RawJob
-from services.embedding_worker import pubsub_push, _process_job
+from services.embedding_worker import pubsub_push
 
 
 def _build_pubsub_request(job_id: str) -> Request:

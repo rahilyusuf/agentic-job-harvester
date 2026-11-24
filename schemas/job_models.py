@@ -52,7 +52,9 @@ class RawJob(BaseModel):
     employment_type_raw: str | None = None
     posted_at: datetime | None = None
     status: JobStatus = JobStatus.NEW_RAW
-    ats_platform: str | None = Field(None, description="lever | workable | greenhouse | unknown")
+    ats_platform: str | None = Field(
+        default=None, description="lever | workable | greenhouse | unknown"
+    )
 
     @field_validator("job_id")
     @classmethod
@@ -74,10 +76,10 @@ class JobStructuredExtraction(BaseModel):
     location_city: str | None = None
     location_country: str | None = None
     is_remote: bool = False
-    yoe_required_min: int | None = Field(None, ge=0, le=40)
-    yoe_required_max: int | None = Field(None, ge=0, le=40)
-    salary_min_usd: int | None = Field(None, ge=0)
-    salary_max_usd: int | None = Field(None, ge=0)
+    yoe_required_min: int | None = Field(default=None, ge=0, le=40)
+    yoe_required_max: int | None = Field(default=None, ge=0, le=40)
+    salary_min_usd: int | None = Field(default=None, ge=0)
+    salary_max_usd: int | None = Field(default=None, ge=0)
     required_skills: list[str] = Field(default_factory=list, max_length=30)
     preferred_skills: list[str] = Field(default_factory=list, max_length=30)
     is_management_role: bool = False
@@ -103,7 +105,7 @@ class EvaluatedJob(BaseModel):
     agreed_score: int = Field(..., ge=0, le=100, description="Final score after consensus/veto")
     debate_rounds: int = Field(..., ge=1, le=2)
     skeptic_vetoed: bool = Field(
-        False, description="True if Skeptic exercised final veto authority"
+        default=False, description="True if Skeptic exercised final veto authority"
     )
     routing_decision: str = Field(..., description="SKIP | PROCESS | HIGH_PRIORITY")
     scorer_rationale: str
@@ -113,5 +115,5 @@ class EvaluatedJob(BaseModel):
     evaluated_at: datetime = Field(default_factory=datetime.utcnow)
     notified_at: Optional[datetime] = None
     tier2_status: Optional[str] = Field(
-        None, description="NULL | PENDING | IN_PROGRESS | COMPLETE"
+        default=None, description="NULL | PENDING | IN_PROGRESS | COMPLETE"
     )

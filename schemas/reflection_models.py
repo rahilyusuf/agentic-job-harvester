@@ -44,7 +44,7 @@ class PreferenceRule(BaseModel):
         description="Natural-language or regex-style condition, e.g. 'company is VC startup'",
     )
     score_delta: int | None = Field(
-        None,
+        default=None,
         ge=-50,
         le=50,
         description="Score adjustment for BOOST/PENALIZE. None for SKIP/PRIORITIZE.",
@@ -64,7 +64,7 @@ class PreferenceRule(BaseModel):
     )
     created_at: datetime = Field(default_factory=datetime.utcnow)
     expires_at: datetime | None = Field(
-        None, description="Optional TTL; None means the rule persists until overwritten"
+        default=None, description="Optional TTL; None means the rule persists until overwritten"
     )
 
 
@@ -72,10 +72,10 @@ class PreferenceRules(BaseModel):
     """Full set of synthesized preference rules, written to Firestore by ReflectionAgent."""
 
     user_id: str
-    synthesis_period_days: int = Field(30, ge=7, le=90)
+    synthesis_period_days: int = Field(default=30, ge=7, le=90)
     rules: list[PreferenceRule] = Field(default_factory=list)
     centroid_updated: bool = Field(
-        False,
+        default=False,
         description="True if e_active_user centroid was recalculated in this run",
     )
     alpha_used: float = Field(
@@ -86,5 +86,5 @@ class PreferenceRules(BaseModel):
     passed_jobs_count: int = Field(..., ge=0)
     synthesized_at: datetime = Field(default_factory=datetime.utcnow)
     reflection_trace_id: str | None = Field(
-        None, description="LangFuse trace ID for this reflection run"
+        default=None, description="LangFuse trace ID for this reflection run"
     )

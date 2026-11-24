@@ -15,8 +15,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from repositories.interfaces import IEmbeddingRepository, IProfileRepository
 from config.settings import get_settings
+from repositories.interfaces import IEmbeddingRepository, IProfileRepository
 
 logger = logging.getLogger(__name__)
 

@@ -67,8 +67,9 @@ DEFAULT_RULES = [
 
 
 async def seed_rules(user_id: str) -> None:
-    from config.settings import get_settings
     from google.cloud import firestore
+
+    from config.settings import get_settings
 
     settings = get_settings()
     fs = firestore.AsyncClient(

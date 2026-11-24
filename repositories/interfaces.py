@@ -15,25 +15,35 @@ from typing import Protocol, runtime_checkable
 
 from schemas.job_models import EvaluatedJob, RawJob
 from schemas.profile_models import UserProfile
-from schemas.scoring_models import ScorerOutput, SkepticOutput
-
+from schemas.publication_models import (
+    BatchInsertResult,
+    CheckpointResult,
+    ProcessingClaim,
+    PublicationClaim,
+    PublicationOwnership,
+)
 
 # ── Raw Jobs ───────────────────────────────────────────────────────────────────
+
 
 @runtime_checkable
 class IRawJobRepository(Protocol):
     """Protocol for raw_job_postings table access."""
 
     async def insert_job(self, job: RawJob) -> None:
-        """Insert a new job record. No-op if job_id already exists within dedup window."""
+        """Insert a new job record. No-op for an existing retained job ID, independently of age."""
         ...
 
-    async def batch_insert_jobs(self, jobs: list[RawJob]) -> int:
-        """Batch insert jobs. Returns number of novel (non-duplicate) jobs inserted."""
+    async def batch_insert_jobs(self, jobs: list[RawJob]) -> list[str]:
+        """Batch insert jobs. Returns newly inserted IDs."""
+        ...
+
+    async def persist_jobs(self, jobs: list[RawJob]) -> BatchInsertResult:
+        """Atomically persist validated jobs and publication intentions."""
         ...
 
     async def exists(self, job_id: str) -> bool:
-        """Check if a job_id exists within the 90-day dedup window."""
+        """Check if a job_id exists among all retained raw rows."""
         ...
 
     async def update_status(self, job_id: str, status: str) -> None:
@@ -50,6 +60,25 @@ class IRawJobRepository(Protocol):
 
 
 # ── Embeddings ─────────────────────────────────────────────────────────────────
+
+
+class IPublicationRepository(Protocol):
+    async def publication_counts(self, job_ids: list[str]) -> dict[str, int]: ...
+    async def claim_pending(
+        self, job_ids: list[str] | None = None, limit: int = 100, min_age_seconds: int = 0,
+        *, deadline: float | None = None,
+    ) -> list[PublicationClaim]: ...
+    async def check_ownership(
+        self, claims: list[PublicationClaim], *, deadline: float | None = None,
+    ) -> list[PublicationOwnership]: ...
+    async def record_outcomes(
+        self, claims: list[PublicationClaim], confirmed: dict[str, str], unconfirmed_ids: list[str],
+        *, deadline: float | None = None,
+    ) -> CheckpointResult: ...
+    async def claim_processing(self, job_id: str) -> ProcessingClaim: ...
+    async def finish_processing(self, claim: ProcessingClaim, embedding: list[float]) -> None: ...
+    async def release_processing(self, claim: ProcessingClaim) -> None: ...
+
 
 @runtime_checkable
 class IEmbeddingRepository(Protocol):
@@ -84,6 +113,7 @@ class IEmbeddingRepository(Protocol):
 
 # ── Evaluated Jobs ─────────────────────────────────────────────────────────────
 
+
 @runtime_checkable
 class IEvaluatedRepository(Protocol):
     """Protocol for job_evaluated table access."""
@@ -105,9 +135,7 @@ class IEvaluatedRepository(Protocol):
         """Return top-scoring jobs for a user above the notification threshold."""
         ...
 
-    async def update_tier2_status(
-        self, job_id: str, user_id: str, tier2_status: str
-    ) -> None:
+    async def update_tier2_status(self, job_id: str, user_id: str, tier2_status: str) -> None:
         """Update the tier2_status field for optimistic locking."""
         ...
 
@@ -117,6 +145,7 @@ class IEvaluatedRepository(Protocol):
 
 
 # ── User Actions (HITL Telemetry) ─────────────────────────────────────────────
+
 
 @runtime_checkable
 class IActionsRepository(Protocol):
@@ -150,6 +179,7 @@ class IActionsRepository(Protocol):
 
 
 # ── User Profiles ──────────────────────────────────────────────────────────────
+
 
 @runtime_checkable
 class IProfileRepository(Protocol):

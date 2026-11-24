@@ -1,6 +1,6 @@
 """utils/time.py — Timestamp and time-window helpers.
 
-Centralises the 90-day deduplication window logic so it cannot drift
+Centralises the 90-day freshness window logic so it cannot drift
 between services (apify_receiver, embedding_worker, etc.).
 
 All functions use UTC. Never use naive datetimes in production code.
@@ -22,10 +22,10 @@ def utcnow() -> datetime:
 
 
 def get_dedup_window_start(window_days: int | None = None) -> datetime:
-    """Return the start of the deduplication window (UTC).
+    """Return the start of the freshness/discovery window (UTC).
 
-    Any job scraped more recently than this timestamp is considered a
-    potential duplicate and must be checked against BigQuery before insert.
+    The legacy function/configuration names are retained for compatibility.
+    Identity checks must cover all history, never use this cutoff.
 
     Args:
         window_days: Override; if None, reads from settings.dedup_window_days.
@@ -38,7 +38,7 @@ def get_dedup_window_start(window_days: int | None = None) -> datetime:
 
 
 def is_within_dedup_window(scraped_at: datetime, window_days: int | None = None) -> bool:
-    """Return True if ``scraped_at`` falls within the dedup window.
+    """Return True if ``scraped_at`` falls within the freshness window.
 
     Args:
         scraped_at: The datetime the job was scraped (must be timezone-aware).

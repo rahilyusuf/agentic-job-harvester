@@ -15,7 +15,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, status
 from pydantic import BaseModel, Field
 
 from config.settings import get_settings

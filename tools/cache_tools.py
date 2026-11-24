@@ -12,7 +12,6 @@ TTL: configurable per-record (default 72 hours) via CompanyResearch.cache_ttl_ho
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import timezone
 

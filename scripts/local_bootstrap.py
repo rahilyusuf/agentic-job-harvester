@@ -11,7 +11,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import asyncio
 import logging
 import os
 import sys
@@ -49,7 +48,6 @@ def validate_env() -> bool:
 def create_bq_dataset(project: str, dataset: str, location: str, dry_run: bool) -> None:
     """Create the BigQuery dataset if it doesn't exist."""
     from google.cloud import bigquery
-    from google.cloud.exceptions import Conflict
 
     client = bigquery.Client(project=project)
     dataset_ref = bigquery.DatasetReference(project, dataset)

@@ -1,169 +1,199 @@
-"""observability/setup.py — LangFuse v4 init, @observe decorator, and trace scoring.
+"""Privacy-safe Langfuse 4 observations; telemetry never retries business work.
 
-Initialises LangFuse once per process (via environment variables). Provides:
-  - ``setup_observability()``    — call at service startup
-  - ``flush_observability()``    — call at service shutdown to drain the buffer
-  - ``get_langfuse()``           — singleton LangFuse v4 client
-  - ``observe``                  — re-export of langfuse.observe (v4 top-level)
-  - ``update_current_span``      — re-export for setting user_id / session_id
-                                   on the active span from within agent code
-  - ``score_trace()``            — emit user_acceptance score on HITL action
-
-Every agent must decorate its public run method with @observe(name="AgentName")
-so prompts, tokens, and latency are captured without manual instrumentation.
-
-LangFuse v4 API notes (SDK 4.x, installed: 4.15.2):
-  - ``from langfuse import observe, get_client`` — no langfuse.decorators module
-  - Client is initialised via LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_HOST
-    env vars only; passing credentials to Langfuse() constructor is no longer supported.
-  - ``create_score()`` replaces the old ``score()`` method.
-  - ``client.update_current_span()`` replaces langfuse_context.update_current_trace().
+Agent decorators retain their names but capture no arguments, results or exception
+content. Gateway generations represent logical Instructor invocations, not provider
+attempts or verified usage/cost. No client or exporter is constructed at import.
 """
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import inspect
 import logging
-from functools import lru_cache
+import os
+from contextlib import contextmanager
+from functools import wraps
+from time import perf_counter
+from typing import Any
 
 import litellm
-import langfuse
-from langfuse import get_client, observe  # re-exported for convenience
-from langfuse import Langfuse
+from langfuse import Langfuse, get_client
 
 from config.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "setup_observability",
-    "flush_observability",
-    "get_langfuse",
-    "observe",
-    "update_current_span",
-    "score_trace",
+    "setup_observability", "flush_observability", "get_langfuse", "observe",
+    "update_current_span", "score_trace", "safe_observation",
 ]
+_AGENT_NAMES = frozenset({
+    "JobIntakeRouter", "ScorerAgent", "SkepticAgent", "CompanyResearchAgent",
+    "CompanyVerificationAgent", "RedFlagDetectorAgent", "SkillGapAgent", "ReflectionAgent",
+})
+_MODEL_ALIASES = frozenset({"router-flash", "fast-flash", "deep-pro"})
+
+
+def _failure(error: BaseException) -> None:
+    try:
+        logger.warning("Langfuse operation failed (error_type=%s)", type(error).__name__)
+    except (Exception, asyncio.CancelledError):
+        pass  # A broken logging handler must not turn telemetry failure into business failure.
+
+
+def remove_langfuse_callbacks() -> None:
+    """Remove only owned callback names, retaining unrelated callback objects/order."""
+    for name in ("callbacks", "success_callback", "failure_callback"):
+        callbacks = getattr(litellm, name, None)
+        if isinstance(callbacks, list):
+            callbacks[:] = [
+                callback for callback in callbacks
+                if not (isinstance(callback, str) and callback in {"langfuse", "langfuse_otel"})
+            ]
 
 
 def setup_observability() -> None:
-    """Initialise LangFuse and wire it as a LiteLLM callback.
-
-    Call this at the top of every Cloud Run service entry point (main / lifespan).
-    Idempotent — safe to call multiple times.
-
-    LangFuse v4 reads credentials exclusively from environment variables:
-      LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_HOST
-    """
-    import os
-
-    settings = get_settings()
-
-    # Set LangFuse env vars before the SDK auto-initialises
-    os.environ.setdefault("LANGFUSE_PUBLIC_KEY", settings.langfuse_public_key)
-    os.environ.setdefault("LANGFUSE_SECRET_KEY", settings.langfuse_secret_key)
-    os.environ.setdefault("LANGFUSE_HOST", settings.langfuse_host)
-
-    # Wire LiteLLM to auto-log via LangFuse
-    # This complements the proxy-side callback in litellm_config.yaml;
-    # ensures local/test runs without the proxy also emit traces.
-    if "langfuse_otel" not in litellm.success_callback:
-        litellm.success_callback.append("langfuse_otel")
-    if "langfuse_otel" not in litellm.failure_callback:
-        litellm.failure_callback.append("langfuse_otel")
-
-    logger.info("Observability initialised (LangFuse host=%s)", settings.langfuse_host)
-
-
-def flush_observability() -> None:
-    """Flush all pending LangFuse events to the backend.
-
-    Call this in every service's shutdown hook (lifespan ``finally`` / ``atexit``).
-    Without an explicit flush, traces buffered in memory are lost when the
-    Cloud Run container exits after the SIGTERM grace period.
-    """
+    """Configure lazily; model routing and unrelated callbacks remain untouched."""
+    remove_langfuse_callbacks()
     try:
-        get_langfuse().flush()
-        logger.info("LangFuse flush complete")
-    except Exception:  # noqa: BLE001
-        logger.warning("LangFuse flush failed — some traces may be lost", exc_info=True)
+        settings = get_settings()
+        os.environ.setdefault("LANGFUSE_PUBLIC_KEY", settings.langfuse_public_key)
+        os.environ.setdefault("LANGFUSE_SECRET_KEY", settings.langfuse_secret_key)
+        os.environ.setdefault("LANGFUSE_HOST", settings.langfuse_host)
+    except Exception as error:
+        _failure(error)
 
 
-@lru_cache(maxsize=1)
-def get_langfuse() -> Langfuse:
-    """Return the singleton LangFuse v4 client.
-
-    LangFuse v4 reads credentials from LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY
-    / LANGFUSE_HOST env vars set by setup_observability() at startup.
-    """
+def get_langfuse() -> Langfuse | None:
+    """Check disablement on every call; the SDK owns its existing client cache."""
+    if os.environ.get("LANGFUSE_TRACING_ENABLED", "true").lower() == "false":
+        return None
     return get_client()
 
 
-def update_current_span(
-    *,
-    user_id: str | None = None,
-    session_id: str | None = None,
-    metadata: dict | None = None,
-) -> None:
-    """Enrich the currently active LangFuse span with trace-level context.
+def _safe_metadata(metadata: dict | None) -> dict:
+    """Deny unknown/free-text values; identifiers are never exported verbatim."""
+    result = {}
+    for key, value in (metadata or {}).items():
+        if key == "operation" and value in ("agent", "structured_completion", "feedback"):
+            result[key] = value
+        elif key == "outcome" and value in ("success", "error", "cancelled"):
+            result[key] = value
+        elif key == "agent_name" and isinstance(value, str) and value in _AGENT_NAMES:
+            result[key] = value
+        elif key == "model_alias" and isinstance(value, str) and value in _MODEL_ALIASES:
+            result[key] = value
+        elif key in ("duration_ms", "retry_limit") and type(value) is int and value >= 0:
+            result[key] = value
+        elif key in ("job_id", "user_id", "correlation_id") and isinstance(value, str):
+            result[key + "_hash"] = hashlib.sha256(value.encode()).hexdigest()
+    return result
 
-    Wraps ``get_client().update_current_span()`` with a safe no-op if there is
-    no active span (e.g. during unit tests without a live LangFuse connection).
 
-    Args:
-        user_id:    Candidate user ID — makes traces filterable per user in the UI.
-        session_id: Job ID — groups all agent spans for the same job in Sessions view.
-        metadata:   Arbitrary extra key-value pairs to attach to the span.
+@contextmanager
+def safe_observation(*, name: str, generation: bool = False, metadata: dict | None = None):
+    """Keep native parenting; never send a business exception to SDK __exit__.
+
+    The SDK owns context attachment and unwinds it on entry and end failures.
+    No fallback ever re-executes the code inside this context manager.
     """
+    manager = observation = None
+    started = perf_counter()
+    safe = {}
     try:
-        extra_meta: dict = metadata or {}
-        if user_id:
-            extra_meta["user_id"] = user_id
-        if session_id:
-            extra_meta["session_id"] = session_id
-        if extra_meta:
-            get_client().update_current_span(metadata=extra_meta)
-    except Exception:  # noqa: BLE001
-        # Never let observability failures propagate into agent logic.
-        logger.debug("update_current_span skipped (no active span or client disabled)")
+        safe = _safe_metadata(metadata)
+        client = get_langfuse()
+        if client is not None:
+            options: dict[str, Any] = {
+                "name": "structured_completion" if generation else name if name in _AGENT_NAMES else "agent",
+                "as_type": "generation" if generation else "span",
+                "input": None, "output": None, "metadata": safe,
+            }
+            if generation and safe.get("model_alias"):
+                options["model"] = safe["model_alias"]
+            candidate = client.start_as_current_observation(**options)
+            observation = candidate.__enter__()
+            manager = candidate
+    except (Exception, asyncio.CancelledError) as error:
+        _failure(error)
+    outcome = "success"
+    try:
+        yield observation
+    except BaseException as error:
+        outcome = "cancelled" if isinstance(error, asyncio.CancelledError) else "error"
+        raise
+    finally:
+        if observation is not None:
+            try:
+                observation.update(metadata={
+                    **safe, "outcome": outcome,
+                    "duration_ms": max(0, round((perf_counter() - started) * 1000)),
+                })
+            except (Exception, asyncio.CancelledError) as error:
+                _failure(error)
+        if manager is not None:
+            try:
+                manager.__exit__(None, None, None)
+            except (Exception, asyncio.CancelledError) as error:
+                _failure(error)
 
 
-def score_trace(
-    trace_id: str,
-    job_id: str,
-    user_action: str,
-    *,
-    comment: str | None = None,
-) -> None:
-    """Emit a ``user_acceptance`` score on a LangFuse trace.
+def observe(func=None, *, name=None, capture_input=False, capture_output=False):
+    """Small sync/async adapter for existing agent decorators; capture stays off.
 
-    Called by the HITL controller when the user clicks ✅ Apply or 👎 Pass.
-
-    Args:
-        trace_id: The LangFuse trace ID created during Tier 1 scoring.
-        job_id: The job_id for audit trail reference.
-        user_action: One of \"apply\" | \"pass\" | \"analyze\".
-        comment: Optional free-text comment from the user.
+    Capture arguments are accepted for compatibility, but cannot enable sensitive
+    capture. Generators are not used by agent entry points and are not instrumented.
     """
-    lf = get_langfuse()
+    def decorate(function):
+        span_name = name if name in _AGENT_NAMES else "agent"
+        metadata = {"operation": "agent", "agent_name": span_name}
+        if inspect.iscoroutinefunction(function):
+            @wraps(function)
+            async def async_call(*args, **kwargs):
+                with safe_observation(name=span_name, metadata=metadata):
+                    return await function(*args, **kwargs)
+            return async_call
 
-    # Map user actions to numeric acceptance score
-    action_scores: dict[str, float] = {
-        "apply": 1.0,
-        "pass": 0.0,
-        "analyze": 0.5,  # neutral — user wants more info
-    }
-    score_value = action_scores.get(user_action.lower(), 0.5)
+        @wraps(function)
+        def sync_call(*args, **kwargs):
+            with safe_observation(name=span_name, metadata=metadata):
+                return function(*args, **kwargs)
+        return sync_call
+    return decorate(func) if func is not None else decorate
 
-    # v4 API: create_score() replaces the old score() method
-    lf.create_score(
-        trace_id=trace_id,
-        name="user_acceptance",
-        value=score_value,
-        comment=comment or f"job_id={job_id} action={user_action}",
-    )
-    logger.info(
-        "LangFuse score emitted: trace_id=%s job_id=%s action=%s score=%.1f",
-        trace_id,
-        job_id,
-        user_action,
-        score_value,
-    )
+
+def flush_observability() -> None:
+    try:
+        client = get_langfuse()
+        if client is not None:
+            client.flush()
+    except Exception as error:
+        _failure(error)
+
+
+def update_current_span(*, user_id=None, session_id=None, metadata=None) -> None:
+    try:
+        safe = _safe_metadata({
+            **(metadata or {}), "user_id": user_id, "correlation_id": session_id,
+        })
+        client = get_langfuse()
+        if client is not None and safe:
+            client.update_current_span(metadata=safe)
+    except Exception as error:
+        _failure(error)
+
+
+def score_trace(trace_id, job_id, user_action, *, comment=None) -> None:
+    """Best-effort feedback. Existing numeric labels remain unchanged for P0."""
+    try:
+        scores = {"apply": 1.0, "pass": 0.0, "analyze": 0.5}
+        action = user_action.lower()
+        client = get_langfuse()
+        if client is not None:
+            client.create_score(
+                trace_id=trace_id, name="user_acceptance", value=scores.get(action, 0.5),
+                comment="action=" + (action if action in scores else "unknown"),
+            )
+    except Exception as error:
+        _failure(error)

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from retrieval.vector_matcher import VectorMatcher, VectorMatchResult
 from schemas.profile_models import ResumeMetadata, UserProfile
-from utils.time import utcnow
 
 
 def make_profile(user_id: str, has_centroid: bool = True) -> UserProfile:

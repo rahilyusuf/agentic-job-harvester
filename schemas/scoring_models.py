@@ -50,11 +50,11 @@ class SkepticOutput(BaseModel):
         ..., ge=0, le=100, description="Skeptic's revised score — this is the FINAL score"
     )
     veto: bool = Field(
-        False,
+        default=False,
         description="If True, Skeptic exercises hard veto. Job is SKIPPED regardless of score.",
     )
     veto_reason: str | None = Field(
-        None, description="Required if veto=True. The blocking disqualifier."
+        default=None, description="Required if veto=True. The blocking disqualifier."
     )
     hidden_disqualifiers: list[str] = Field(
         default_factory=list,
@@ -62,7 +62,7 @@ class SkepticOutput(BaseModel):
     )
     rationale: str = Field(..., min_length=50)
     request_round_2: bool = Field(
-        False,
+        default=False,
         description="True if |scorer_score - agreed_score| > 10 and round_number == 1",
     )
 

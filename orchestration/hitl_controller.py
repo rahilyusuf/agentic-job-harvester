@@ -194,8 +194,9 @@ class HITLController:
 
     async def _trigger_tier2(self, job_id: str, user_id: str, trace_id: str) -> None:
         """Publish a Tier 2 trigger message to Pub/Sub."""
-        from google.cloud import pubsub_v1
         import json
+
+        from google.cloud import pubsub_v1
 
         publisher = pubsub_v1.PublisherClient()
         topic_path = publisher.topic_path(

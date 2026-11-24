@@ -29,6 +29,7 @@ from google.cloud import aiplatform
 from pydantic import BaseModel
 
 from config.settings import get_settings
+from observability.setup import remove_langfuse_callbacks, safe_observation
 
 logger = logging.getLogger(__name__)
 
@@ -36,14 +37,11 @@ logger = logging.getLogger(__name__)
 
 
 def _configure_litellm() -> None:
-    """Configure LiteLLM to route through the proxy with LangFuse callbacks."""
+    """Preserve proxy routing; native gateway observations own Langfuse capture."""
     settings = get_settings()
     litellm.api_base = settings.litellm_proxy_base_url
     litellm.api_key = settings.litellm_proxy_api_key
-    # LangFuse callback is already wired in litellm_config.yaml on the proxy side;
-    # this client-side registration ensures local/test runs also emit traces.
-    litellm.success_callback = ["langfuse"]
-    litellm.failure_callback = ["langfuse"]
+    remove_langfuse_callbacks()
 
 
 # Initialise once at import time
@@ -98,18 +96,23 @@ class GatewayClient:
         Returns:
             Validated instance of response_model.
         """
-        metadata: dict[str, Any] = kwargs.pop("metadata", {})
+        metadata: dict[str, Any] = dict(kwargs.pop("metadata", {}))
         if trace_id:
             metadata["trace_id"] = trace_id
 
-        return await self._client.chat.completions.create(
-            model=model,
-            response_model=response_model,
-            messages=messages,
-            max_retries=max_retries,
-            metadata=metadata,
-            **kwargs,
-        )
+        with safe_observation(
+            name="structured_completion", generation=True,
+            metadata={"operation": "structured_completion", "model_alias": model,
+                      "retry_limit": max_retries, "correlation_id": trace_id},
+        ):
+            return await self._client.chat.completions.create(
+                model=model,
+                response_model=response_model,
+                messages=messages,
+                max_retries=max_retries,
+                metadata=metadata,
+                **kwargs,
+            )
 
 
 @lru_cache(maxsize=1)

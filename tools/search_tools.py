@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import logging
 import re
-from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -40,8 +39,9 @@ async def google_search(query: str, num_results: int = 5) -> list[dict[str, str]
         List of dicts with keys: 'title', 'url', 'snippet'.
         Returns empty list if the search fails.
     """
-    from config.settings import get_settings
     import os
+
+    from config.settings import get_settings
 
     settings = get_settings()
 

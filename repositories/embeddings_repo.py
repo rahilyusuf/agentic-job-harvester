@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 
 from google.cloud import bigquery
 
@@ -65,10 +65,12 @@ class EmbeddingRepository:
         """Fetch the embedding vector for a job_id."""
         query = f"""
             SELECT embedding FROM `{self._table}`
-            WHERE job_id = '{job_id}'
+            WHERE job_id = @job_id
             LIMIT 1
         """
-        rows = list(self._client.query_and_wait(query))
+        rows = list(self._client.query_and_wait(query, job_config=bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ScalarQueryParameter("job_id", "STRING", job_id)]
+        )))
         if not rows:
             return None
         return list(rows[0].embedding)

@@ -6,8 +6,9 @@ Tests the veto rule: skeptic veto bypasses score and forces SKIP.
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 
 from schemas.job_models import RawJob
 from schemas.scoring_models import ScorerOutput, SkepticOutput

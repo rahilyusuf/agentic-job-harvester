@@ -11,9 +11,8 @@ Usage:
 
 from __future__ import annotations
 
-import os
 from functools import lru_cache
-from typing import Optional
+from typing import Literal
 
 from google.cloud import secretmanager
 from pydantic import Field, field_validator, model_validator
@@ -67,6 +66,12 @@ class Settings(BaseSettings):
     firestore_database_id: str = Field(default="(default)", description="Firestore database ID")
 
     # ── Pub/Sub ───────────────────────────────────────────────────────────────
+    publication_ledger_enabled: bool = Field(
+        default=False, description="Enable reviewed BigQuery outbox and processing claims"
+    )
+    publication_lease_seconds: int = Field(default=1800, ge=1200, le=7200)
+    publication_worker_timeout_seconds: int = Field(default=300, ge=5, le=600)
+    reconciliation_secret: str = Field(default="", exclude=True)
     pubsub_embedding_topic: str = Field(
         default="job-embedding-queue", description="Pub/Sub topic for job embedding queue"
     )
@@ -87,6 +92,13 @@ class Settings(BaseSettings):
     )
 
     # ── Apify ─────────────────────────────────────────────────────────────────
+    ingestion_log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
+        default="INFO", description="Ingestion event verbosity; use DEBUG for local diagnostics"
+    )
+    apify_ingest_aborted_runs: bool = Field(
+        default=False,
+        description="Allow verified ACTOR.RUN.ABORTED events to ingest saved records",
+    )
     apify_webhook_secret: str = Field(
         default="", description="HMAC secret for Apify webhook validation"
     )
@@ -116,7 +128,7 @@ class Settings(BaseSettings):
     )
 
     # ── Deduplication ─────────────────────────────────────────────────────────
-    dedup_window_days: int = Field(default=90, ge=1, le=365, description="BQ dedup window in days")
+    dedup_window_days: int = Field(default=90, ge=1, le=365, description="Freshness/recovery discovery window in days; not job identity")
 
     # ── Retrieval ─────────────────────────────────────────────────────────────
     vector_search_top_k: int = Field(
@@ -133,6 +145,11 @@ class Settings(BaseSettings):
     @classmethod
     def bq_location_upper(cls, v: str) -> str:
         return v.upper()
+
+    @field_validator("ingestion_log_level", mode="before")
+    @classmethod
+    def ingestion_log_level_upper(cls, value: object) -> object:
+        return value.upper() if isinstance(value, str) else value
 
     @field_validator("apify_allowed_actor_ids", mode="before")
     @classmethod

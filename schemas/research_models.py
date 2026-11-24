@@ -54,12 +54,12 @@ class CompanyProfile(BaseModel):
     entity_type: EntityType = EntityType.UNKNOWN
     headcount_bracket: HeadcountBracket = HeadcountBracket.UNKNOWN
     funding_stage: FundingStage = FundingStage.UNKNOWN
-    founded_year: int | None = Field(None, ge=1800, le=2030)
+    founded_year: int | None = Field(default=None, ge=1800, le=2030)
     hq_location: str | None = None
     linkedin_url: HttpUrl | None = None
     website_url: HttpUrl | None = None
     recent_news_summary: str | None = Field(
-        None, max_length=500, description="Last 6 months notable events (layoffs, funding, pivots)"
+        default=None, max_length=500, description="Last 6 months notable events (layoffs, funding, pivots)"
     )
     confidence: float = Field(..., ge=0.0, le=1.0)
     sources_used: list[str] = Field(default_factory=list)
@@ -73,11 +73,13 @@ class CompanyResearch(BaseModel):
 
     job_id: str
     company_name: str
-    cache_hit: bool = Field(False, description="True if result was served from Firestore cache")
+    cache_hit: bool = Field(
+        default=False, description="True if result was served from Firestore cache"
+    )
     iterations_used: int = Field(..., ge=1, le=5)
     profile: CompanyProfile
     application_history_summary: str | None = Field(
-        None, description="Summary from check_application_history tool result"
+        default=None, description="Summary from check_application_history tool result"
     )
     research_summary: str = Field(
         ..., min_length=100, description="Full narrative synthesis of all research"

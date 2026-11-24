@@ -8,7 +8,7 @@ The retrieval layer depends on repositories/interfaces.py,
 never on concrete *_repo.py classes.
 """
 
-from retrieval.vector_matcher import VectorMatcher
 from retrieval.regex_prefilter import RegexPrefilter
+from retrieval.vector_matcher import VectorMatcher
 
 __all__ = ["VectorMatcher", "RegexPrefilter"]

@@ -37,6 +37,6 @@ class RouterDecision(BaseModel):
         description="IDs or names of Firestore preference rules that influenced this decision",
     )
     skip_reason: str | None = Field(
-        None,
+        default=None,
         description="If SKIP, the primary disqualifier (title mismatch, seniority, location, etc.)",
     )

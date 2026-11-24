@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import enum
 from datetime import datetime
-from typing import Optional
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -45,7 +44,7 @@ class RedFlagAnalysis(BaseModel):
         description="Estimated probability this is a ghost/evergreen job (>60 days active)"
     )
     glassdoor_toxicity_score: float | None = Field(
-        None, ge=0.0, le=1.0,
+        default=None, ge=0.0, le=1.0,
         description="Normalized toxicity score from Glassdoor scrape if available"
     )
     has_critical_flags: bool = False
@@ -70,10 +69,10 @@ class SkillGap(BaseModel):
         description="True = required skill the user doesn't have. False = nice-to-have gap.",
     )
     proficiency_required: str | None = Field(
-        None, description="e.g. '3+ years production experience', 'familiarity', etc."
+        default=None, description="e.g. '3+ years production experience', 'familiarity', etc."
     )
     learning_path: str | None = Field(
-        None,
+        default=None,
         max_length=300,
         description="Suggested resource / approach to close this gap (for non-blocking)",
     )

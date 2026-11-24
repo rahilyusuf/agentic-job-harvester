@@ -1,7 +1,8 @@
-﻿"""tests/services/test_apify_receiver.py — Integration and stage flow tests for apify_receiver."""
+"""tests/services/test_apify_receiver.py — Integration and stage flow tests for apify_receiver."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -22,7 +23,6 @@ from services.apify_receiver import (
     _verify_actor_run,
     apify_webhook,
     reconcile_unpublished_jobs,
-    trigger_reconciliation,
 )
 
 
@@ -165,7 +165,7 @@ async def test_receiver_tracks_apply_url_fallback_and_logs(
         ),
         patch("services.apify_receiver.RawJobRepository") as mock_repo_cls,
         patch("services.apify_receiver._publish_job_ids", new=AsyncMock(return_value=(5, 0))),
-        caplog.at_level(logging.INFO, logger="services.apify_receiver"),
+        caplog.at_level(logging.INFO, logger="ingestion.events"),
     ):
         mock_repo = mock_repo_cls.return_value
         mock_repo.batch_insert_jobs = AsyncMock(return_value=["id1", "id2", "id3", "id4", "id5"])
@@ -183,25 +183,27 @@ async def test_receiver_tracks_apply_url_fallback_and_logs(
     assert response["inserted"] == 5
     assert response["published"] == 5
 
-    # 2. Assert stage log flow
-    log_text = "\n".join(record.message for record in caplog.records)
-    assert "── APIFY WEBHOOK START" in log_text
-    assert "── WEBHOOK PARSED" in log_text
-    assert "── FETCHING DATASET  dataset_id=dataset-xyz" in log_text
-    assert "── DATASET FETCHED  item_count=6  dataset_id=dataset-xyz" in log_text
-    assert "── NORMALIZATION START  items=6" in log_text
-    assert (
-        "── NORMALIZATION COMPLETE  received=6  valid=5  skipped=1  apply_url_fallback=3"
-        in log_text
+    # 2. Assert semantic stage flow and counters, independent of console formatting.
+    events = [record.event_fields for record in caplog.records if hasattr(record, "event_fields")]
+    names = [event["event"] for event in events]
+    milestones = [
+        "ingestion.webhook.received",
+        "ingestion.actor.verified",
+        "ingestion.dataset.fetched",
+        "ingestion.normalization.completed",
+        "ingestion.bigquery.completed",
+        "ingestion.recovery.completed",
+        "ingestion.pubsub.completed",
+        "ingestion.completed",
+    ]
+    assert [names.index(name) for name in milestones] == sorted(
+        names.index(name) for name in milestones
     )
-    assert "── BIGQUERY PERSIST START  jobs_to_insert=5" in log_text
-    assert "── BIGQUERY PERSIST COMPLETE  novel_inserted=5  duplicates_skipped=0" in log_text
-    assert "── PUBSUB PUBLISH START  job_ids_to_publish=5" in log_text
-    assert "── PUBSUB PUBLISH COMPLETE  published=5  failures=0" in log_text
-    assert (
-        "── APIFY WEBHOOK COMPLETE  dataset_id=dataset-xyz  received=6  normalized=5  apply_url_fallback=3"
-        in log_text
-    )
+    final = events[-1]
+    assert final["received"] == 6 and final["normalized"] == 5
+    assert final["rejected"] == 1 and final["apply_url_fallback"] == 3
+    assert final["unique"] == 5 and final["in_batch_duplicates"] == 0
+    assert len({event["request_id"] for event in events}) == 1
 
 
 @pytest.mark.unit
@@ -1166,6 +1168,284 @@ def group1_dataset() -> list[dict[str, Any]]:
     )
     # This regression requires the downloaded fixture; never silently skip it.
     return json.loads(dataset_path.read_text(encoding="utf-8-sig"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("secret,expected_status", [("", 500), ("dummy-secret", 401)])
+async def test_authentication_failure_precedes_body_parsing(
+    group1_ingestion, monkeypatch, secret, expected_status
+):
+    from services import apify_receiver as receiver
+
+    _, fetch, repo, publish = group1_ingestion
+    settings = receiver.get_settings()
+    settings.environment = "production"
+    settings.apify_webhook_secret = secret
+    parse = MagicMock(side_effect=AssertionError("Unauthenticated body must not be parsed"))
+    monkeypatch.setattr(receiver, "_parse_webhook_payload", parse)
+    with patch.object(receiver, "_verify_actor_run", new_callable=AsyncMock) as verify:
+        with pytest.raises(HTTPException) as error:
+            await receiver.apify_webhook(_build_mock_request(b"{malformed"))
+    assert error.value.status_code == expected_status
+    parse.assert_not_called()
+    verify.assert_not_awaited()
+    fetch.assert_not_awaited()
+    repo.batch_insert_jobs.assert_not_awaited()
+    publish.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_webhook_redaction_registration_precedes_body_failure(group1_ingestion, caplog):
+    from services import apify_receiver as receiver
+
+    _, fetch, repo, publish = group1_ingestion
+    settings = receiver.get_settings()
+    fields = (
+        "apify_api_token", "apify_webhook_secret", "litellm_proxy_api_key",
+        "telegram_bot_token", "e2b_api_key", "langfuse_secret_key", "reconciliation_secret",
+    )
+    secrets = [f"CONFIG_CANARY_{name}" for name in fields]
+    for name, value in zip(fields, secrets, strict=True):
+        setattr(settings, name, value)
+    header_secret = "HEADER_BODY_FAILURE_CANARY"
+    request = _build_mock_request({}, [(b"authorization", f"Bearer {header_secret}".encode())])
+    captured = []
+
+    async def failed_body():
+        state = receiver.context()
+        assert state is not None
+        captured.extend(state.secrets)
+        raise RuntimeError(" ".join([*secrets, header_secret]))
+
+    with (
+        patch.object(request, "body", new_callable=AsyncMock, side_effect=failed_body) as read,
+        patch.object(receiver, "_verify_actor_run", new_callable=AsyncMock) as verify,
+        pytest.raises(RuntimeError),
+    ):
+        await receiver.apify_webhook(request)
+    read.assert_awaited_once_with()
+    assert set(secrets + [header_secret, f"Bearer {header_secret}"]) == set(captured)
+    verify.assert_not_awaited()
+    fetch.assert_not_awaited()
+    repo.batch_insert_jobs.assert_not_awaited()
+    publish.assert_not_awaited()
+    failed = [
+        r.event_fields for r in caplog.records
+        if getattr(r, "event", None) == "ingestion.failed"
+    ]
+    assert len(failed) == 1 and failed[0]["stage"] == "authentication"
+    assert all(secret not in caplog.text for secret in [*secrets, header_secret])
+    assert receiver.context() is None
+
+
+@pytest.mark.asyncio
+async def test_payload_actor_denial_precedes_missing_apify_token(group1_ingestion, caplog):
+    from services import apify_receiver as receiver
+
+    payload, fetch, repo, publish = group1_ingestion
+    settings = receiver.get_settings()
+    settings.apify_allowed_actor_ids = ["allowed-actor"]
+    settings.apify_api_token = ""
+    caplog.set_level(logging.INFO, logger="ingestion.events")
+    with patch.object(receiver, "_verify_actor_run", new_callable=AsyncMock) as verify:
+        with pytest.raises(HTTPException) as error:
+            await receiver.apify_webhook(_build_mock_request(payload))
+    assert error.value.status_code == 403
+    assert error.value.detail == "Actor ID 'actor-group1' is not authorized"
+    verify.assert_not_awaited()
+    fetch.assert_not_awaited()
+    repo.batch_insert_jobs.assert_not_awaited()
+    publish.assert_not_awaited()
+    events = [r.event_fields for r in caplog.records if hasattr(r, "event_fields")]
+    assert not any(e["event"] == "ingestion.actor.authorized" for e in events)
+    failed = [e for e in events if e["event"] == "ingestion.failed"]
+    assert len(failed) == 1 and failed[0]["stage"] == "actor_authorization"
+    site = failed[0]["failure_site"]
+    assert site["file"] == "services/apify_receiver.py"
+    origin = getattr(receiver, "_authorize_webhook_actor", receiver._ingest_webhook)
+    assert site["function"] == origin.__name__
+
+
+@pytest.mark.asyncio
+async def test_missing_apify_token_stops_before_run_verification(group1_ingestion, caplog):
+    from services import apify_receiver as receiver
+
+    payload, fetch, repo, publish = group1_ingestion
+    settings = receiver.get_settings()
+    settings.apify_allowed_actor_ids = ["actor-group1"]
+    settings.apify_api_token = ""
+    caplog.set_level(logging.INFO, logger="ingestion.events")
+    with patch.object(receiver, "_verify_actor_run", new_callable=AsyncMock) as verify:
+        with pytest.raises(HTTPException) as error:
+            await receiver.apify_webhook(_build_mock_request(payload))
+    assert error.value.status_code == 503
+    assert error.value.detail == (
+        "Apify API token is not configured. "
+        "Set APIFY_API_TOKEN in .env (local) or the 'apify-api-token' "
+        "Secret Manager secret (production)."
+    )
+    verify.assert_not_awaited()
+    fetch.assert_not_awaited()
+    repo.batch_insert_jobs.assert_not_awaited()
+    publish.assert_not_awaited()
+    events = [r.event_fields for r in caplog.records if hasattr(r, "event_fields")]
+    names = [e["event"] for e in events]
+    assert names.index("ingestion.event.validated") < names.index(
+        "ingestion.actor.authorized"
+    ) < names.index("ingestion.failed")
+    assert "ingestion.actor.verification_started" not in names
+    authorized = next(e for e in events if e["event"] == "ingestion.actor.authorized")
+    assert authorized["allowlist_enforced"] is True
+    assert "verified" not in authorized
+    origin = getattr(receiver, "_authorize_webhook_actor", receiver._ingest_webhook)
+    assert authorized["source"]["function"] == origin.__name__
+    failed = next(e for e in events if e["event"] == "ingestion.failed")
+    assert failed["stage"] == "actor_authorization"
+    assert failed["failure_site"]["function"] == origin.__name__
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "header", ["Authorization", "X-Apify-Signature", "X-Apify-Webhook-Secret", "X-Dev-Token"]
+)
+async def test_webhook_secret_registration_preserves_header_variants(
+    group1_ingestion, monkeypatch, caplog, header
+):
+    from contextvars import ContextVar
+
+    from services import apify_receiver as receiver
+
+    _, fetch, repo, publish = group1_ingestion
+    local_settings = ContextVar("test_request_settings")
+    monkeypatch.setattr(receiver, "get_settings", local_settings.get)
+    states = {}
+    caplog.set_level(logging.DEBUG, logger="ingestion.events")
+
+    async def one(label, other):
+        config_secret = f"CONFIG_SECRET_{label}"
+        header_secret = f"HEADER_SECRET_{label}"
+        value = f"Bearer {header_secret}" if header == "Authorization" else header_secret
+        token = local_settings.set(_make_test_settings(apify_api_token=config_secret))
+        request = _build_mock_request({}, [(header.lower().encode(), value.encode())])
+
+        async def failed_body():
+            state = receiver.context()
+            assert state is not None
+            states[label] = state
+            assert config_secret in state.secrets and value in state.secrets
+            if header == "Authorization":
+                assert header_secret in state.secrets
+            await asyncio.sleep(0)  # Both requests hold different credentials concurrently.
+            assert receiver.context() is state
+            assert state is not states[other] and state.secrets is not states[other].secrets
+            assert f"CONFIG_SECRET_{other}" not in state.secrets
+            assert f"HEADER_SECRET_{other}" not in state.secrets
+            receiver.emit("ingestion.record.rejected", logging.DEBUG, reason=header_secret)
+            raise RuntimeError(header_secret)
+
+        try:
+            with (
+                patch.object(request, "body", new_callable=AsyncMock, side_effect=failed_body),
+                pytest.raises(RuntimeError),
+            ):
+                await receiver.apify_webhook(request)
+            assert receiver.context() is None
+        finally:
+            local_settings.reset(token)
+
+    with patch.object(receiver, "_verify_actor_run", new_callable=AsyncMock) as verify:
+        await asyncio.gather(one("FIRST", "SECOND"), one("SECOND", "FIRST"))
+    assert states["FIRST"].request_id != states["SECOND"].request_id
+    verify.assert_not_awaited()
+    fetch.assert_not_awaited()
+    repo.batch_insert_jobs.assert_not_awaited()
+    publish.assert_not_awaited()
+    events = [r.event_fields for r in caplog.records if hasattr(r, "event_fields")]
+    rejected = [e for e in events if e["event"] == "ingestion.record.rejected"]
+    assert len(rejected) == 2
+    assert all(e["reason"].startswith("sha256:") for e in rejected)
+    assert len({e["request_id"] for e in rejected}) == 2
+    for label in ("FIRST", "SECOND"):
+        assert f"CONFIG_SECRET_{label}" not in caplog.text
+        assert f"HEADER_SECRET_{label}" not in caplog.text
+    assert receiver.context() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["hmac", "shared", "bearer"])
+async def test_authenticated_body_is_read_once_before_verification(
+    group1_ingestion, mode, caplog
+):
+    from services import apify_receiver as receiver
+
+    payload, fetch, repo, publish = group1_ingestion
+    settings = receiver.get_settings()
+    settings.environment = "production"
+    secret = "BODY_AUTHENTICATION_SECRET_CANARY"
+    settings.apify_webhook_secret = secret
+    # Preserve whitespace: HMAC authenticates the original bytes, not re-serialized JSON.
+    body = ("  " + json.dumps(payload, indent=2) + "\n").encode()
+    headers = {
+        "hmac": [(b"x-apify-signature", hmac.new(
+            secret.encode(), body, hashlib.sha256
+        ).hexdigest().encode())],
+        "shared": [(b"x-apify-webhook-secret", secret.encode())],
+        "bearer": [(b"authorization", f"Bearer {secret}".encode())],
+    }[mode]
+    request = _build_mock_request(body, headers=headers)
+    fetch.return_value = []
+    caplog.set_level(logging.INFO, logger="ingestion.events")
+    with patch.object(request, "body", new_callable=AsyncMock, return_value=body) as read:
+        result = await receiver.apify_webhook(request)
+    read.assert_awaited_once_with()
+    assert result["received"] == 0
+    fetch.assert_awaited_once_with("dataset-group1", "dummy-token")
+    repo.batch_insert_jobs.assert_not_awaited()
+    publish.assert_not_awaited()
+    events = [r.event_fields for r in caplog.records if hasattr(r, "event_fields")]
+    names = [event["event"] for event in events]
+    assert names.index("ingestion.authentication.verified") < names.index(
+        "ingestion.event.validated"
+    ) < names.index("ingestion.actor.verified") < names.index(
+        "ingestion.dataset.verified"
+    ) < names.index("ingestion.dataset.fetch_started")
+    assert next(e for e in events if e["event"] == "ingestion.authentication.verified")[
+        "source"
+    ]["function"] == "_authenticate_webhook"
+    assert next(e for e in events if e["event"] == "ingestion.dataset.verified")[
+        "source"
+    ]["function"] == "_verify_webhook_provenance"
+    assert secret not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verified_dataset", [None, "", "   "])
+async def test_succeeded_missing_verified_dataset_preserves_warning_and_fetch(
+    group1_ingestion, verified_dataset, caplog
+):
+    from services import apify_receiver as receiver
+
+    payload, fetch, repo, publish = group1_ingestion
+    verified = {**payload["resource"], "defaultDatasetId": verified_dataset}
+    fetch.return_value = []
+    caplog.set_level(logging.INFO, logger="ingestion.events")
+    with patch.object(receiver, "_verify_actor_run", AsyncMock(return_value=verified)):
+        result = await receiver.apify_webhook(_build_mock_request(payload))
+    assert result["received"] == 0
+    fetch.assert_awaited_once_with("dataset-group1", "dummy-token")
+    repo.batch_insert_jobs.assert_not_awaited()
+    publish.assert_not_awaited()
+    records = [
+        r for r in caplog.records
+        if getattr(r, "event", None) == "ingestion.dataset.verified"
+    ]
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    assert records[0].event_fields["verified"] is False
+    assert next(
+        r.event_fields for r in caplog.records
+        if getattr(r, "event", None) == "ingestion.completed"
+    )["outcome"] == "partial"
 
 
 @pytest.mark.unit

@@ -1,3 +1,32 @@
 # Development tooling must never enter any production Docker build context.
 devtools/
 tests/devtools/
+
+# Local credentials, environments, source control and downloaded data.
+.git/
+.codex/
+.aws/
+.config/
+.local/
+.agents/
+venv/
+.venv/
+env/
+**/.env*
+**/application_default_credentials.json
+**/*credentials*.json
+**/*service-account*.json
+**/*.pem
+**/*.key
+Input/
+tests/
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage*
+htmlcov/
+
+# This opt-in integration harness must not enter production images.
+scripts/verify_publication_ledger.py

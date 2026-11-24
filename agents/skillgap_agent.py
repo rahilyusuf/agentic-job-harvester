@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from pydantic import BaseModel, Field
+
 from agents.base import BaseIntelligenceAgent
 from observability.setup import observe
 from schemas.diligence_models import CodeChallenge, SkillGap, SkillGapReport
@@ -18,9 +20,6 @@ from schemas.job_models import RawJob
 from tools.e2b_tools import execute_in_sandbox
 
 logger = logging.getLogger(__name__)
-
-# Intermediate schema for LLM gap identification before E2B execution
-from pydantic import BaseModel, Field
 
 
 class _GapIdentificationOutput(BaseModel):
@@ -154,7 +153,8 @@ class SkillGapAgent(BaseIntelligenceAgent):
         self, skill: str, challenge_messages: list[dict[str, str]]
     ) -> CodeChallenge:
         """Generate Python challenge code and execute in E2B."""
-        from pydantic import BaseModel as _BM, Field as _F
+        from pydantic import BaseModel as _BM
+        from pydantic import Field as _F
 
         class _CodeOutput(_BM):
             python_code: str = _F(..., description="Runnable Python code for the challenge")

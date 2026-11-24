@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+
 from retrieval.regex_prefilter import RegexPrefilter
 from schemas.job_models import RawJob
 from utils.time import utcnow

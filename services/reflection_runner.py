@@ -11,9 +11,9 @@ import asyncio
 import logging
 import sys
 
+from agents.reflection_agent import ReflectionAgent
 from config.settings import get_settings
 from observability.setup import setup_observability
-from agents.reflection_agent import ReflectionAgent
 from repositories.actions_repo import ActionsRepository
 from repositories.embeddings_repo import EmbeddingRepository
 from repositories.profiles_repo import ProfileRepository

@@ -1,8 +1,10 @@
 """Shared ordered normalization and first-valid-occurrence deduplication."""
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 
+from observability.ingestion_logging import context, emit
 from schemas.job_models import RawJob
 from services.normalizers import apify_career_scraper
 
@@ -19,15 +21,23 @@ class NormalizedBatch:
     apply_url_fallback: int
 
 
-def normalize_batch(items: list[object]) -> NormalizedBatch:
+def normalize_batch(items: Sequence[object]) -> NormalizedBatch:
     jobs: dict[str, RawJob] = {}
     normalized = rejected = duplicates = fallbacks = 0
-    for item in items:
+    state = context()
+    for index, item in enumerate(items):
+        if state:
+            state.record_index = index
         try:
             _, fallback = apify_career_scraper.resolve_job_url(item)
             job = apify_career_scraper.normalize(item)
         except (TypeError, ValueError) as exc:
-            logger.warning("Skipping malformed dataset item: %s", type(exc).__name__)
+            emit(
+                "ingestion.record.rejected",
+                logging.DEBUG,
+                reason="invalid_field",
+                error_type=type(exc).__name__,
+            )
             rejected += 1
             continue
         if job is None:
@@ -39,6 +49,8 @@ def normalize_batch(items: list[object]) -> NormalizedBatch:
             duplicates += 1
         else:
             jobs[job.job_id] = job
+    if state:
+        state.record_index = None
     return NormalizedBatch(
         list(jobs.values()), len(items), normalized, rejected, duplicates, fallbacks
     )

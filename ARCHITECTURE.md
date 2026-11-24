@@ -41,8 +41,10 @@ normalizes fields, handles apply-URL fallback, and sanitizes fields without prom
 wrappers before constructing `RawJob`. IDs use ATS identity where available or URL
 hash fallback; [utils/ids.py](utils/ids.py) owns identity helpers.
 
-[repositories/raw_jobs_repo.py](repositories/raw_jobs_repo.py) queries the dedupe
-window (default 90 days), inserts novel records as `NEW_RAW`, and returns inserted IDs.
+[repositories/raw_jobs_repo.py](repositories/raw_jobs_repo.py) checks all retained raw
+IDs, inserts novel records as `NEW_RAW`, and returns inserted IDs. Ninety days is a
+freshness/discovery window, not an identity reset. Legacy streaming remains vulnerable
+to concurrent inserts and cannot retain identity beyond raw-row expiration.
 The receiver publishes those IDs, plus existing `NEW_RAW` IDs recovered on webhook
 retry. `/reconcile` and `/jobs/reconcile` rediscover saved/unembedded jobs independently.
 Publication futures are resolved in an executor and failures are counted. This is
@@ -59,6 +61,51 @@ Evidence tests: [test_apify_receiver.py](tests/services/test_apify_receiver.py),
 [test_embedding_worker.py](tests/services/test_embedding_worker.py). Preserve ingestion
 behavior, credentials/provenance checks, publication recovery, and these regressions.
 Generic n8n ingestion is **Planned**; this actor-specific receiver is not evidence for it.
+
+### Opt-in durable publication and worker claims
+
+The flow above describes the default legacy path. **Implemented, opt-in:**
+`PUBLICATION_LEDGER_ENABLED` selects atomic raw-job/publication-intent DML in
+`repositories/raw_jobs_repo.py`, the DML-only `repositories/publications_repo.py`,
+and the shared dispatcher/composition in `services/publication_dispatcher.py` and
+`services/ingestion_publications.py`. `sql/job_publications.sql` defines the sidecar;
+raw schemas, source IDs, provider settings and webhook request shape stay unchanged.
+`BatchInsertResult` separates inserted/existing/rejected/unconfirmed IDs; publication
+and processing claims are typed in `schemas/publication_models.py`.
+
+PENDING/IN_FLIGHT/PUBLISHED/UNKNOWN describe broker publication, not embedding readiness.
+Transactions serialize mutations through a no-op DELETE guard; leased claims and fenced
+checkpoints suppress routine republication. Lifetime identity also consults the retained
+ledger across topics/versions; recrawls preserve original content and status. Missing raw
+rows behind a retained identity and duplicate raw IDs fail closed for review.
+
+The dispatcher checks ownership and raw-row uniqueness before each group, checks its
+monotonic lease budget before SDK submission, and checkpoints at most ten attempts.
+Valid outcomes commit independently of stale claims. SDK uncertainty is resolved through
+the same query job ID; only proven transaction aborts permit a bounded fresh transaction.
+Checkpoint retries do not resend messages. Publication counts require durable checkpoints.
+The dispatcher has a 900-second bound and never claims exactly-once publication:
+broker-acceptance/checkpoint crashes and final-check/send races remain at-least-once.
+The worker's opt-in claim commits vector persistence, raw status and processing completion
+together. Busy deliveries retry instead of ACKing incomplete work; completed duplicates
+skip. This is not a guarantee of exactly-once provider computation after crash/timeout.
+
+**Unverified / rollout required:** live schema, SQL execution/transaction contention,
+streaming-buffer clearance, IAM, routing, schedules and migration evidence. The feature
+defaults off; no application startup creates resources or migrates existing jobs.
+`scripts/plan_publication_migration.py` only produces a local manifest: existing NEW_RAW
+jobs without evidence remain UNKNOWN, with no automatic replay or fabricated timestamps.
+See [rollout and contracts](docs/ingestion-publications.md) and mocked
+[reliability tests](tests/services/test_publication_reliability.py). HTTP reconciliation
+now requires an explicitly configured `RECONCILIATION_SECRET`, independently of the flag.
+
+**Implemented tooling, live behavior Unverified:**
+`scripts/verify_publication_ledger.py` prepares an offline resource/source manifest and
+separately gates isolated provisioning, metadata checks, real SDK scenarios and cleanup.
+It reuses normalization, persistence, ingestion composition and the default dispatcher;
+it neither invokes Apify nor consumes subscriptions nor activates production flags.
+Execution requires scoped IAM review and Python 3.11. The integration tool, local
+environments, credentials and fixtures are excluded from the production Docker context.
 
 ## Model access
 
@@ -212,12 +259,31 @@ while updating documentation; design compatibility/migrations first.
 
 ## Observability and reflection
 
-**Implemented:** [observability/setup.py](observability/setup.py) re-exports `observe`,
-initializes Langfuse callbacks, provides flushing, and calls `create_score()`. Public
-agent methods are decorated; `_call_llm()` itself is not. Gateway/proxy callbacks use
-`langfuse` while setup adds `langfuse_otel`. Privacy controls, callback duplication,
-SDK compatibility and reliable trace linkage are **Unverified**. Flushing exists but
-is not called by every service lifecycle. See S-5 and S-9 before expanding capture.
+**Implemented:** `observability/setup.py` preserves named sync/async agent decorators
+using native Langfuse 4 span observations without argument/result or exception-content
+capture. The gateway creates one child generation per logical Instructor invocation;
+this is not a count of provider requests or verified token/cost accounting. Controlled
+metadata is allowlisted and explicit identifiers are hashed. Telemetry entry/update/exit,
+feedback and flush errors are best-effort; business failures and cancellation propagate.
+Application-owned automatic Langfuse callbacks are removed without replacing unrelated
+LiteLLM callbacks. The proxy YAML disables its automatic Langfuse callbacks; a separately
+running proxy must be checked independently. No model/provider routing changes occur.
+
+**Unverified:** live SDK/proxy export and deployed configuration, reliable end-to-end
+trace linkage and feedback ownership. Current application UUID metadata does not establish
+an SDK trace context. Flushing is not called by every service lifecycle. See S-5 and S-9;
+this P0 correction does not close those broader findings.
+
+**Implemented:** ingestion events retain stable names, request correlation and compact
+INFO summaries. `observability/diagnostics.py` supplies relative emitter and application
+failure locations, skipping SDK/retry infrastructure frames. Named dependency boundaries
+distinguish BigQuery duplicate checking from streaming insertion. Only allowlisted status,
+reason and explicit job-ID metadata is captured; exception messages, SQL and frame locals
+are excluded. WARN/ERROR consoles show concise diagnostics; JSON/file output keeps the
+structured metadata. Retry classification is diagnostic only: this does not change the
+legacy retry policy or establish the cause/outcome of a historical BigQuery failure.
+The receiver also emits its effective BigQuery location and ledger flag at startup,
+before any webhook, without constructing a repository or exposing other settings.
 
 [ReflectionAgent](agents/reflection_agent.py) reads 30-day feedback and accepted
 embeddings, computes `(1 - alpha) * e_resume + alpha * accepted_centroid`, and gradually

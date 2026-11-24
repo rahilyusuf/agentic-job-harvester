@@ -18,7 +18,6 @@ import sys
 from config.settings import get_settings
 from observability.setup import setup_observability
 from orchestration.pipeline import build_tier1_pipeline
-from repositories.actions_repo import ActionsRepository
 from repositories.embeddings_repo import EmbeddingRepository
 from repositories.evaluated_repo import EvaluatedRepository
 from repositories.profiles_repo import ProfileRepository

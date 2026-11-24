@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from schemas.job_models import EvaluatedJob, RawJob
+import pytest
+
+from schemas.job_models import RawJob
 from schemas.routing_models import RouterDecision, RoutingDecision
 from schemas.scoring_models import ScorerOutput, SkepticOutput
 from utils.time import utcnow
@@ -56,6 +57,7 @@ async def test_pipeline_skip_halts_immediately(
 ) -> None:
     """SKIP routing decision halts pipeline — no scoring happens."""
     from unittest.mock import patch
+
     from orchestration.pipeline import build_tier1_pipeline
 
     skip_decision = RouterDecision(
@@ -99,6 +101,7 @@ async def test_pipeline_produces_evaluated_job_on_process(
 ) -> None:
     """PROCESS routing decision runs full debate and writes EvaluatedJob."""
     from unittest.mock import patch
+
     from orchestration.pipeline import build_tier1_pipeline
 
     process_decision = RouterDecision(

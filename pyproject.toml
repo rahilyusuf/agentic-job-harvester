@@ -37,6 +37,8 @@ markers = [
 [tool.ruff]
 target-version = "py311"
 line-length = 100
+
+[tool.ruff.lint]
 select = [
     "E",   # pycodestyle errors
     "W",   # pycodestyle warnings
@@ -50,13 +52,9 @@ select = [
     "SIM", # simplification
     "TCH", # type-checking imports
 ]
-ignore = [
-    "ANN101",  # missing self annotation
-    "ANN102",  # missing cls annotation
-    "ANN401",  # allow Any in dynamic contexts
-]
+ignore = ["ANN401"]  # allow Any in dynamic contexts
 
-[tool.ruff.isort]
+[tool.ruff.lint.isort]
 known-first-party = ["agents", "config", "gateway", "observability", "orchestration", "repositories", "retrieval", "schemas", "services", "tools", "utils"]
 
 [tool.mypy]
@@ -75,7 +73,7 @@ fail_under = 70
 show_missing = true
 
 [tool.poe.tasks]
-dev = "uvicorn services.apify_receiver:app --reload"
+dev = "python -m uvicorn services.apify_receiver:app --reload --host 127.0.0.1 --port 8000"
 test = "pytest"
 bootstrap = "python scripts/local_bootstrap.py"
 lint = "ruff check ."
