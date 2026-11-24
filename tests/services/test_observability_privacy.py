@@ -3,7 +3,8 @@
 import asyncio
 import inspect
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import litellm
 import pytest
@@ -51,7 +52,9 @@ def sdk(monkeypatch):
 
     monkeypatch.setattr(client, "start_as_current_observation", start)
     monkeypatch.setattr(setup, "get_langfuse", lambda: client)
-    yield SimpleNamespace(client=client, records=records, observations=observations, calls=calls)
+    yield SimpleNamespace(
+        client=client, records=records, observations=observations, calls=calls, provider=provider,
+    )
     provider.shutdown()
 
 
@@ -359,3 +362,73 @@ def test_proxy_changes_only_owned_telemetry_callbacks():
     assert {m["model_name"] for m in config["model_list"]} == {
         "router-flash", "fast-flash", "deep-pro",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["enter", "end"])
+@pytest.mark.parametrize("telemetry_type", [RuntimeError, asyncio.CancelledError])
+@pytest.mark.parametrize("outcome", ["success", "error", "cancelled"])
+async def test_native_sdk_failures_preserve_parent_and_business(
+    sdk: Any, monkeypatch: pytest.MonkeyPatch, phase: str,
+    telemetry_type: type[BaseException], outcome: str,
+) -> None:
+    telemetry_error = telemetry_type("TELEMETRY_CANARY")
+    business_error = (
+        asyncio.CancelledError("BUSINESS_CANARY") if outcome == "cancelled"
+        else ValueError("BUSINESS_CANARY")
+    )
+    count = 0
+    faults_enabled = False
+
+    class EndFailure(SpanProcessor):
+        def on_end(self, span: Any) -> None:
+            if faults_enabled:
+                raise telemetry_error
+
+    def entry_failure(**kwargs: Any) -> None:
+        raise telemetry_error
+
+    @setup.observe(name="ScorerAgent")
+    async def operation() -> int:
+        nonlocal count
+        count += 1
+        # Entry failure must have already unwound the SDK context before business code.
+        if phase == "enter":
+            assert otel_context.get_current() is parent_context
+        if outcome != "success":
+            raise business_error
+        return 42
+
+    initial = otel_context.get_current()
+    with sdk.client.start_as_current_observation(name="parent", as_type="span"):
+        parent_context = otel_context.get_current()
+        if phase == "enter":
+            monkeypatch.setattr(sdk.client, "_get_span_class", lambda kind: entry_failure)
+        else:
+            sdk.provider.add_span_processor(EndFailure())
+        faults_enabled = True
+        try:
+            if outcome == "success":
+                assert await operation() == 42
+            else:
+                with pytest.raises(type(business_error)) as raised:
+                    await operation()
+                assert raised.value is business_error
+            assert count == 1
+            assert otel_context.get_current() is parent_context
+        finally:
+            faults_enabled = False  # Let the healthy parent close normally.
+    assert otel_context.get_current() is initial
+    # The SDK may record its own injected entry fault, never the business failure.
+    assert "BUSINESS_CANARY" not in str([record.events for record in sdk.records])
+
+
+def test_adapter_does_not_add_context_attachments_beyond_native_sdk(sdk: Any) -> None:
+    with patch.object(otel_context, "attach", wraps=otel_context.attach) as attach:
+        with sdk.client.start_as_current_observation(name="ScorerAgent", as_type="span"):
+            pass
+        native_count = attach.call_count
+        attach.reset_mock()
+        with setup.safe_observation(name="ScorerAgent"):
+            pass
+        assert attach.call_count == native_count

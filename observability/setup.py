@@ -19,7 +19,6 @@ from typing import Any
 
 import litellm
 from langfuse import Langfuse, get_client
-from opentelemetry import context as otel_context
 
 from config.settings import get_settings
 
@@ -36,10 +35,10 @@ _AGENT_NAMES = frozenset({
 _MODEL_ALIASES = frozenset({"router-flash", "fast-flash", "deep-pro"})
 
 
-def _failure(error: Exception) -> None:
+def _failure(error: BaseException) -> None:
     try:
         logger.warning("Langfuse operation failed (error_type=%s)", type(error).__name__)
-    except Exception:
+    except (Exception, asyncio.CancelledError):
         pass  # A broken logging handler must not turn telemetry failure into business failure.
 
 
@@ -96,17 +95,16 @@ def _safe_metadata(metadata: dict | None) -> dict:
 def safe_observation(*, name: str, generation: bool = False, metadata: dict | None = None):
     """Keep native parenting; never send a business exception to SDK __exit__.
 
-    The outer OTel token also restores context when telemetry entry/exit fails.
+    The SDK owns context attachment and unwinds it on entry and end failures.
     No fallback ever re-executes the code inside this context manager.
     """
-    manager = observation = token = None
+    manager = observation = None
     started = perf_counter()
     safe = {}
     try:
         safe = _safe_metadata(metadata)
         client = get_langfuse()
         if client is not None:
-            token = otel_context.attach(otel_context.get_current())
             options: dict[str, Any] = {
                 "name": "structured_completion" if generation else name if name in _AGENT_NAMES else "agent",
                 "as_type": "generation" if generation else "span",
@@ -117,7 +115,7 @@ def safe_observation(*, name: str, generation: bool = False, metadata: dict | No
             candidate = client.start_as_current_observation(**options)
             observation = candidate.__enter__()
             manager = candidate
-    except Exception as error:
+    except (Exception, asyncio.CancelledError) as error:
         _failure(error)
     outcome = "success"
     try:
@@ -126,26 +124,19 @@ def safe_observation(*, name: str, generation: bool = False, metadata: dict | No
         outcome = "cancelled" if isinstance(error, asyncio.CancelledError) else "error"
         raise
     finally:
-        try:
-            if observation is not None:
-                try:
-                    observation.update(metadata={
-                        **safe, "outcome": outcome,
-                        "duration_ms": max(0, round((perf_counter() - started) * 1000)),
-                    })
-                except Exception as error:
-                    _failure(error)
-            if manager is not None:
-                try:
-                    manager.__exit__(None, None, None)
-                except Exception as error:
-                    _failure(error)
-        finally:
-            if token is not None:
-                try:
-                    otel_context.detach(token)
-                except Exception as error:
-                    _failure(error)
+        if observation is not None:
+            try:
+                observation.update(metadata={
+                    **safe, "outcome": outcome,
+                    "duration_ms": max(0, round((perf_counter() - started) * 1000)),
+                })
+            except (Exception, asyncio.CancelledError) as error:
+                _failure(error)
+        if manager is not None:
+            try:
+                manager.__exit__(None, None, None)
+            except (Exception, asyncio.CancelledError) as error:
+                _failure(error)
 
 
 def observe(func=None, *, name=None, capture_input=False, capture_output=False):
