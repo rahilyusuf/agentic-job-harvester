@@ -3,7 +3,6 @@
 import asyncio
 import json
 import logging
-import math
 import random
 import re
 import time
@@ -13,6 +12,7 @@ from google.cloud import bigquery
 
 from config.settings import Settings, get_settings
 from observability.ingestion_logging import emit
+from schemas.job_models import validate_embedding_vector
 from schemas.publication_models import (
     PROCESSING_VERSION,
     CheckpointResult,
@@ -381,8 +381,7 @@ class PublicationRepository:
         return ProcessingClaim.model_validate(rows[0])
 
     async def finish_processing(self, claim: ProcessingClaim, embedding: list[float]) -> None:
-        if len(embedding) != 768 or any(not math.isfinite(v) for v in embedding):
-            raise ValueError("Invalid embedding artifact")
+        embedding = validate_embedding_vector(embedding)
         sql = f"""
         BEGIN TRANSACTION;
         DELETE FROM `{self.table}` WHERE FALSE;
