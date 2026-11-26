@@ -9,6 +9,14 @@ records source evidence; [conventions](conventions.md) own boundaries. Prioritie
 are implementation planning recommendations, not findings about deployed exposure.
 Live IAM, schemas, data, SDK versions and proxy traffic remain Unverified.
 
+Embedding milestone update (2026-11-24): the legacy embedding MERGE now parameterizes
+its values (partial S-3), and both embedding write paths reject nonnumeric/non-finite
+or non-768-value artifacts (partial I-6). Pub/Sub malformed-envelope handling is
+consistent in both modes, and the local Vertex request/response SDK incompatibilities
+have offline regression coverage. See [architecture evidence](../../ARCHITECTURE.md#implemented-ingestion-and-embedding-flow).
+These changes do not close SQL safety elsewhere, configured-identifier validation,
+vector provenance/refresh, legacy concurrency, blocking I/O, ingress IAM or A-1 routing.
+
 ## Immediate security work — Planned, not implemented in Phase 1
 
 | ID / priority | Exact affected files | Evidence and intended remediation | Dependencies / regression risk |

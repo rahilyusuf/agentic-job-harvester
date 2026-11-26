@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import json
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 from config.settings import get_settings
@@ -59,23 +60,28 @@ async def health() -> dict[str, str]:
 @app.post("/", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
 async def pubsub_push(request: Request) -> JSONResponse | None:
     """Handle Pub/Sub push message containing a job_id to embed."""
-    envelope = await request.json()
-    message = envelope.get("message", {})
-    data_b64 = message.get("data", "")
-
     try:
-        data_str = base64.b64decode(data_b64).decode("utf-8")
+        envelope = await request.json()
+        if not isinstance(envelope, dict) or not isinstance(envelope.get("message"), dict):
+            raise ValueError("Invalid envelope")
+        data_b64 = envelope["message"].get("data")
+        if not isinstance(data_b64, str):
+            raise ValueError("Invalid message data")
+        data_str = base64.b64decode(data_b64, validate=True).decode("utf-8")
         payload = json.loads(data_str)
-        job_id = payload["job_id"]
-    except (KeyError, ValueError, Exception) as exc:  # noqa: BLE001
-        logger.error("Failed to parse Pub/Sub message: %s", exc)
-        # Return 200 to ack and discard malformed messages
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid payload")
+        job_id = payload.get("job_id")
+        if not isinstance(job_id, str) or not job_id.strip():
+            raise ValueError("Invalid job identifier")
+        job_id = job_id.strip()
+    except (ValueError, binascii.Error):
+        emit("embedding.message.invalid", logging.WARNING, error_category="malformed_message")
+        # Return 204 to ACK and discard malformed messages in either mode.
         return
 
     if get_settings().publication_ledger_enabled:
         try:
-            if not isinstance(job_id, str) or not job_id.strip():
-                raise ValueError("Invalid job identifier")
             await _process_job(job_id)
         except Exception as exc:
             emit("embedding.processing.retry", logging.WARNING, error_type=type(exc).__name__)
@@ -96,7 +102,10 @@ async def _process_job(job_id: str) -> None:
     job = await raw_repo.get_job(job_id)
     if job is None:
         logger.warning("Job not found for embedding: job_id=%s", job_id)
-        return
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Processing incomplete; retry delivery",
+        )
 
     if job.status not in (JobStatus.NEW_RAW.value, JobStatus.EMBEDDING_QUEUED.value):
         logger.info("Job %s already processed (status=%s), skipping", job_id, job.status)

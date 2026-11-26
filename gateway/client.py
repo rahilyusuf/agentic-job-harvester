@@ -30,6 +30,7 @@ from pydantic import BaseModel
 
 from config.settings import get_settings
 from observability.setup import remove_langfuse_callbacks, safe_observation
+from schemas.job_models import validate_embedding_vector
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +128,6 @@ def get_instructor_client() -> GatewayClient:
 # ── Embedding helper ───────────────────────────────────────────────────────────
 
 _EMBEDDING_MODEL = "text-embedding-004"
-_EMBEDDING_DIMENSIONS = 768
 
 
 async def generate_embedding(text: str) -> list[float]:
@@ -173,15 +173,20 @@ def _blocking_embed(text: str, project_id: str) -> list[float]:
     instance = struct_pb2.Value()
     instance.struct_value.fields["content"].string_value = text[:10000]  # hard cap
 
-    request = PredictRequest(endpoint=endpoint, instances=[instance])
+    # Populate the wire protobuf directly: proto-plus repeated Value coercion can
+    # turn a one-element instances list into a non-iterable mapping.
+    request_pb = PredictRequest.pb()()
+    request_pb.endpoint = endpoint
+    request_pb.instances.add().CopyFrom(instance)
+    request = PredictRequest.wrap(request_pb)
     response = client.predict(request=request)
+    return _parse_embedding_response(response)
 
-    values: list[float] = list(response.predictions[0].struct_value.fields["embeddings"]
-                                .struct_value.fields["values"].list_value.values)
-    values_float = [v.number_value for v in values]
 
-    if len(values_float) != _EMBEDDING_DIMENSIONS:
-        raise ValueError(
-            f"Expected {_EMBEDDING_DIMENSIONS}-dim embedding, got {len(values_float)}"
-        )
-    return values_float
+def _parse_embedding_response(response: Any) -> list[float]:
+    """Proto-plus exposes Value/Struct/ListValue as Python mappings/sequences."""
+    try:
+        values = response.predictions[0]["embeddings"]["values"]
+    except (AttributeError, IndexError, KeyError, TypeError):
+        raise ValueError("Invalid embedding prediction structure") from None
+    return validate_embedding_vector(values)

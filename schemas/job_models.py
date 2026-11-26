@@ -10,9 +10,31 @@ from __future__ import annotations
 
 import enum
 from datetime import datetime
-from typing import Optional
+from typing import Annotated, Optional
 
-from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    HttpUrl,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
+
+EMBEDDING_DIMENSIONS = 768
+_embedding_vector = TypeAdapter(Annotated[
+    list[Annotated[float, Field(strict=True, allow_inf_nan=False)]],
+    Field(min_length=EMBEDDING_DIMENSIONS, max_length=EMBEDDING_DIMENSIONS),
+])
+
+
+def validate_embedding_vector(value: object) -> list[float]:
+    """Require 768 finite numbers; never coerce strings/bools or expose input in errors."""
+    try:
+        return _embedding_vector.validate_python(value)
+    except ValidationError:
+        raise ValueError("Invalid embedding vector: expected 768 finite numbers") from None
 
 
 class JobStatus(str, enum.Enum):

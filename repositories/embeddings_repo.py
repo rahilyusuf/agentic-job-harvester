@@ -13,8 +13,9 @@ from datetime import datetime
 from google.cloud import bigquery
 
 from config.settings import get_settings
+from schemas.job_models import validate_embedding_vector
 from utils.retry import async_retry
-from utils.time import format_bq_timestamp, utcnow
+from utils.time import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -43,22 +44,28 @@ class EmbeddingRepository:
     ) -> None:
         """Insert or update a 768-dim embedding for a job.
 
-        Uses MERGE to handle race conditions from concurrent embedding workers.
+        MERGE replaces an existing artifact; legacy concurrent processing remains
+        best-effort and does not acquire a processing claim.
         """
-        ts = format_bq_timestamp(embedded_at or utcnow())
-        embedding_json = json.dumps(embedding)
+        embedding = validate_embedding_vector(embedding)
 
         query = f"""
             MERGE `{self._table}` T
-            USING (SELECT '{job_id}' AS job_id) S
+            USING (SELECT @job_id AS job_id) S
             ON T.job_id = S.job_id
             WHEN MATCHED THEN
-              UPDATE SET embedding = {embedding_json}, embedded_at = '{ts}'
+              UPDATE SET embedding = @embedding, embedded_at = @embedded_at
             WHEN NOT MATCHED THEN
               INSERT (job_id, embedding, embedded_at)
-              VALUES ('{job_id}', {embedding_json}, '{ts}')
+              VALUES (@job_id, @embedding, @embedded_at)
         """
-        self._client.query_and_wait(query)
+        self._client.query_and_wait(query, job_config=bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("job_id", "STRING", job_id),
+                bigquery.ArrayQueryParameter("embedding", "FLOAT64", embedding),
+                bigquery.ScalarQueryParameter("embedded_at", "TIMESTAMP", embedded_at or utcnow()),
+            ]
+        ))
         logger.info("Upserted embedding for job_id=%s", job_id)
 
     async def get_embedding(self, job_id: str) -> list[float] | None:

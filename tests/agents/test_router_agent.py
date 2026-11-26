@@ -5,13 +5,19 @@ Uses unittest.mock to patch gateway.client.GatewayClient so no real LLM calls ar
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from schemas.job_models import RawJob
 from schemas.routing_models import RouterDecision, RoutingDecision
 from utils.time import utcnow
+
+
+@pytest.fixture(autouse=True)
+def offline_firestore(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Routing calls are mocked; its unused client must not discover credentials."""
+    monkeypatch.setattr("agents.router_agent.firestore.AsyncClient", MagicMock())
 
 
 @pytest.fixture

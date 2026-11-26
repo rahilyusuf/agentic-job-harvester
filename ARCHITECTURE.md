@@ -56,6 +56,29 @@ loads a job, processes `NEW_RAW`/`EMBEDDING_QUEUED`, writes the embedding, and m
 `EMBEDDING_DONE`. Caught failures reset to `NEW_RAW` and propagate for retry; hard
 process termination and concurrent deliveries require additional recovery (I-2).
 
+**Implemented, offline embedding milestone (2026-11-24):** the HTTP boundary validates
+both envelope objects, strict Base64/UTF-8, decoded JSON objects and nonblank string
+job IDs before loading dependencies. IDs are stripped consistently with `RawJob`.
+Malformed messages ACK with 204 in both modes. Successful processing and completed
+duplicates also ACK with 204; processing errors remain HTTP 500 in legacy mode and
+503 in ledger mode. Missing-job correction (2026-11-25): a valid message whose raw
+job is missing returns 503 in both modes, allowing redelivery if the row becomes
+visible later. Permanently malformed messages continue to ACK with 204.
+Legacy embedding MERGE values use typed query parameters. The gateway and both write
+adapters validate 768 finite numbers through `schemas/job_models.py`; strings and
+booleans are rejected and errors omit input values. The ledger transaction is unchanged.
+
+[test_embedding_offline.py](tests/services/test_embedding_offline.py) exercises the
+HTTP route, real gateway and real repository adapters with synthetic SDK-native
+predictions and stateful fake BigQuery clients in both flag modes. It covers completed
+duplicates, malformed messages, invalid vectors and failed persistence. Fake outcomes
+are not a SQL emulator or evidence of live transaction atomicity. Run focused tests or
+the offline suite with `python -B scripts/run_offline_tests.py [pytest paths/options]`;
+the runner blocks network/credential/secret access before collection, disables `.env`
+loading and telemetry export, excludes integration-marked tests and uses a fresh
+workspace `tmp/` directory. Test flag overrides are process-local; configured flags
+and external resources are untouched.
+
 Evidence tests: [test_apify_receiver.py](tests/services/test_apify_receiver.py),
 [test_apify_career_scraper.py](tests/services/test_apify_career_scraper.py), and
 [test_embedding_worker.py](tests/services/test_embedding_worker.py). Preserve ingestion
@@ -126,6 +149,12 @@ initializes AI Platform and offloads `_blocking_embed()` to an executor. The lat
 calls Vertex `PredictionServiceClient` directly for `text-embedding-004`, checks 768
 values, and hardcodes `us-central1` despite a configurable region. It does not call
 LiteLLM `/embeddings`; no embedding alias exists in proxy configuration.
+
+The adapter constructs the request through the generated wire protobuf, then wraps
+it as `PredictRequest`, avoiding the local proto-plus repeated-Value constructor
+failure. Predictions are parsed as mapping/sequence values, rather than accessing
+`.struct_value` on proto-plus `MapComposite`. Offline regressions use the actual
+installed SDK types; deployed dependency compatibility remains Unverified.
 
 **Planned requirement, decision outstanding (A-1):** proxy-controlled embeddings remain
 the target. This documentation neither approves the direct adapter permanently nor

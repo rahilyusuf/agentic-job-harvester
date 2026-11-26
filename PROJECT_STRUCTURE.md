@@ -58,10 +58,16 @@ Generic n8n support is also Planned.
   every service module. Cloud Build contains active deploy steps; live deployment is Unverified.
 - `scripts/` contains `local_bootstrap.py`, `backfill_embeddings.py`, and
   `seed_preference_rules.py`. These may mutate external state; they are not documentation checks.
+- `scripts/run_offline_tests.py` installs network, credential and secret guards before
+  pytest collection, supplies dummy process settings and excludes integration-marked
+  tests. Per-run pytest artifacts stay in ignored `tmp/` directories.
 - `tests/agents/`, `tests/orchestration/`, `tests/retrieval/`, `tests/repositories/`,
   and `tests/services/` hold corresponding regression tests. Existing service tests
   cover normalization, ingestion auth/provenance, publication failure/recovery and
   worker retries. Test presence does not imply a passing run or deployed verification.
+- `tests/services/test_embedding_offline.py` verifies the embedding HTTP route through
+  real gateway/repository adapters with synthetic Vertex responses and fake BigQuery
+  clients, covering both publication-ledger modes without live resources.
 - `requirements.txt` declares dependency ranges; `pyproject.toml` declares Python
   compatibility, package discovery and development-tool settings. Neither is proof
   of the installed environment.

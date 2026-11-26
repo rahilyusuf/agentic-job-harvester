@@ -12,6 +12,12 @@ from schemas.scoring_models import ScorerOutput, SkepticOutput
 from utils.time import utcnow
 
 
+@pytest.fixture(autouse=True)
+def offline_firestore(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The mocked router still constructs its otherwise unused Firestore client."""
+    monkeypatch.setattr("agents.router_agent.firestore.AsyncClient", MagicMock())
+
+
 @pytest.fixture
 def sample_job() -> RawJob:
     return RawJob(
