@@ -16,7 +16,7 @@ import json
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 from config.settings import get_settings
@@ -102,7 +102,10 @@ async def _process_job(job_id: str) -> None:
     job = await raw_repo.get_job(job_id)
     if job is None:
         logger.warning("Job not found for embedding: job_id=%s", job_id)
-        return
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Processing incomplete; retry delivery",
+        )
 
     if job.status not in (JobStatus.NEW_RAW.value, JobStatus.EMBEDDING_QUEUED.value):
         logger.info("Job %s already processed (status=%s), skipping", job_id, job.status)

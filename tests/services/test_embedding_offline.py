@@ -364,13 +364,36 @@ async def test_ledger_failure_releases_only_certain_work(
     assert h.bq.job.status == (JobStatus.EMBEDDING_QUEUED if uncertain else JobStatus.NEW_RAW)
 
 
-@pytest.mark.parametrize("ledger, expected", [(False, 204), (True, 503)])
+@pytest.mark.parametrize("ledger", [False, True])
 @pytest.mark.asyncio
-async def test_missing_raw_job_retains_existing_ack_policy(
-    harness: SimpleNamespace, ledger: bool, expected: int,
+async def test_missing_raw_job_is_retryable_in_both_modes(
+    harness: SimpleNamespace, ledger: bool,
 ) -> None:
     h = harness
     h.settings.publication_ledger_enabled = ledger
     h.bq.missing = True
-    assert (await post(envelope({"job_id": h.bq.job.job_id}))).status_code == expected
+    assert (await post(envelope({"job_id": h.bq.job.job_id}))).status_code == 503
     h.predict.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_legacy_missing_job_succeeds_when_visible_on_redelivery(
+    harness: SimpleNamespace,
+) -> None:
+    h = harness
+    h.settings.publication_ledger_enabled = False
+    message = envelope({"job_id": h.bq.job.job_id})
+    h.bq.missing = True
+
+    first = await post(message)
+    assert first.status_code == 503
+    h.predict.assert_not_called()
+    assert h.bq.vector is None and h.bq.job.status == JobStatus.NEW_RAW
+    assert len(h.bq.calls) == 1 and "SELECT *" in h.bq.calls[0][0]
+
+    h.bq.missing = False
+    second = await post(message)
+    assert second.status_code == 204
+    h.predict.assert_called_once()
+    assert h.bq.vector == VECTOR and h.bq.job.status == JobStatus.EMBEDDING_DONE
+    assert sum("MERGE" in sql for sql, _ in h.bq.calls) == 1

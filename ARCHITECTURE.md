@@ -61,7 +61,9 @@ both envelope objects, strict Base64/UTF-8, decoded JSON objects and nonblank st
 job IDs before loading dependencies. IDs are stripped consistently with `RawJob`.
 Malformed messages ACK with 204 in both modes. Successful processing and completed
 duplicates also ACK with 204; processing errors remain HTTP 500 in legacy mode and
-503 in ledger mode. Missing raw jobs retain legacy 204 / ledger 503 behavior.
+503 in ledger mode. Missing-job correction (2026-11-25): a valid message whose raw
+job is missing returns 503 in both modes, allowing redelivery if the row becomes
+visible later. Permanently malformed messages continue to ACK with 204.
 Legacy embedding MERGE values use typed query parameters. The gateway and both write
 adapters validate 768 finite numbers through `schemas/job_models.py`; strings and
 booleans are rejected and errors omit input values. The ledger transaction is unchanged.
