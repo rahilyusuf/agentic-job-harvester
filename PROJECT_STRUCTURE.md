@@ -52,6 +52,28 @@ Generic n8n support is also Planned.
 
 ## Infrastructure, operations and tests
 
+- `.github/workflows/ci.yml` defines Stage 1 CI for pull requests targeting `dev`
+  and `main`: Ubuntu 24.04, Python 3.11, read-only repository permissions, hashed
+  wheel-only dependency installation, `pip check`, a blocking Ruff serious-error
+  subset, an advisory full Ruff report, and the guarded offline test runner.
+  It supplies no cloud credentials and performs no builds or deployments. A
+  successful GitHub-hosted run remains Unverified until the workflow runs there.
+- `requirements-ci.in` includes the runtime manifest and pins pytest,
+  pytest-asyncio, and Ruff. `requirements-ci.txt` locks their transitive dependencies
+  with hashes for Linux x86_64/Python 3.11; it is not a production dependency lock
+  or a Windows lock. CI consumes this file without regenerating it. Update the
+  lock whenever its inputs change. Regenerate with `uv==0.9.18` installed in an
+  isolated tooling environment:
+
+  ```sh
+  uv pip compile requirements-ci.in --python-version 3.11 --python-platform x86_64-manylinux_2_39 --generate-hashes --only-binary :all: --index-url https://pypi.org/simple --output-file requirements-ci.txt
+  ```
+
+  Validate with the workflow's install, dependency check, lint, and offline-test
+  commands on Linux/Python 3.11. Existing Ruff debt is advisory; only
+  `E9,F63,F7,F82` blocks CI. Pytest plugin autoload is disabled and pytest-asyncio
+  is explicitly loaded. The offline runner excludes integration-marked tests and
+  fails on forbidden dependency attempts, even when an attempted call is caught.
 - `infra/` contains `apify_receiver.Dockerfile`, `embedding_worker.Dockerfile`,
   `tier1_matcher_runner.Dockerfile`, `telegram_webhook.Dockerfile`,
   `reflection_runner.Dockerfile`, and `cloudbuild.yaml`. There is no Dockerfile for
